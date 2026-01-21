@@ -50,49 +50,65 @@ class SUITAtlasLoader:
     synthetic atlas data for testing purposes.
     """
 
-    # Standard SUIT atlas region labels for the posterior fossa
+    # Standard SUIT atlas region labels (from Diedrichsen 2009 atlas)
+    # Labels match atl-Anatom_space-SUIT_dseg.nii
     REGION_LABELS = {
-        1: "Left Cerebellum I-IV",
-        2: "Right Cerebellum I-IV",
-        3: "Left Cerebellum V",
-        4: "Right Cerebellum V",
-        5: "Left Cerebellum VI",
-        6: "Right Cerebellum VI",
-        7: "Vermis VI",
-        8: "Left Cerebellum Crus I",
-        9: "Right Cerebellum Crus I",
-        10: "Left Cerebellum Crus II",
-        11: "Right Cerebellum Crus II",
-        12: "Left Cerebellum VIIb",
-        13: "Right Cerebellum VIIb",
-        14: "Left Cerebellum VIIIa",
-        15: "Right Cerebellum VIIIa",
-        16: "Left Cerebellum VIIIb",
-        17: "Right Cerebellum VIIIb",
-        18: "Left Cerebellum IX",
-        19: "Right Cerebellum IX",
-        20: "Left Cerebellum X",
-        21: "Right Cerebellum X",
-        22: "Vermis Crus I",
-        23: "Vermis Crus II",
-        24: "Vermis VIIb",
-        25: "Vermis VIIIa",
-        26: "Vermis VIIIb",
-        27: "Vermis IX",
-        28: "Vermis X",
-        29: "Brainstem",
-        30: "Fourth Ventricle",
+        1: "Left I-IV",
+        2: "Right I-IV",
+        3: "Left V",
+        4: "Right V",
+        5: "Left VI",
+        6: "Vermis VI",
+        7: "Right VI",
+        8: "Left Crus I",
+        9: "Vermis Crus I",
+        10: "Right Crus I",
+        11: "Left Crus II",
+        12: "Vermis Crus II",
+        13: "Right Crus II",
+        14: "Left VIIb",
+        15: "Vermis VIIb",
+        16: "Right VIIb",
+        17: "Left VIIIa",
+        18: "Vermis VIIIa",
+        19: "Right VIIIa",
+        20: "Left VIIIb",
+        21: "Vermis VIIIb",
+        22: "Right VIIIb",
+        23: "Left IX",
+        24: "Vermis IX",
+        25: "Right IX",
+        26: "Left X",
+        27: "Vermis X",
+        28: "Right X",
+        29: "Left Dentate",
+        30: "Right Dentate",
+        31: "Left Interposed",
+        32: "Right Interposed",
+        33: "Left Fastigial",
+        34: "Right Fastigial",
     }
 
-    def __init__(self, atlas_dir: Optional[Path] = None):
+    # Default path to bundled atlas files
+    DEFAULT_ATLAS_DIR = Path(__file__).parent.parent.parent / "data" / "atlases" / "SUIT"
+
+    def __init__(self, atlas_dir: Optional[Path] = None, use_bundled: bool = True):
         """
         Initialize the SUIT atlas loader.
 
         Args:
             atlas_dir: Path to directory containing SUIT atlas files.
-                      If None, synthetic data will be generated.
+                      If None and use_bundled=True, uses bundled atlas files.
+                      If None and use_bundled=False, generates synthetic data.
+            use_bundled: If True and atlas_dir is None, use bundled atlas files
+                        from DiedrichsenLab/cerebellar_atlases repository.
         """
-        self.atlas_dir = Path(atlas_dir) if atlas_dir else None
+        if atlas_dir is not None:
+            self.atlas_dir = Path(atlas_dir)
+        elif use_bundled and self.DEFAULT_ATLAS_DIR.exists():
+            self.atlas_dir = self.DEFAULT_ATLAS_DIR
+        else:
+            self.atlas_dir = None
         self._cached_data: Optional[AtlasData] = None
 
     def load(self, use_cache: bool = True) -> AtlasData:
@@ -122,13 +138,25 @@ class SUITAtlasLoader:
         """Load atlas from NIfTI files."""
         import nibabel as nib
 
-        template_path = self.atlas_dir / "SUIT_template.nii.gz"
-        labels_path = self.atlas_dir / "SUIT_labels.nii.gz"
+        # Try bundled DiedrichsenLab atlas filenames first
+        template_path = self.atlas_dir / "tpl-SUIT_T1w.nii"
+        labels_path = self.atlas_dir / "atl-Anatom_space-SUIT_dseg.nii"
+
+        # Fall back to legacy filenames if not found
+        if not template_path.exists():
+            template_path = self.atlas_dir / "SUIT_template.nii.gz"
+            if not template_path.exists():
+                template_path = self.atlas_dir / "SUIT_template.nii"
+
+        if not labels_path.exists():
+            labels_path = self.atlas_dir / "SUIT_labels.nii.gz"
+            if not labels_path.exists():
+                labels_path = self.atlas_dir / "SUIT_labels.nii"
 
         if not template_path.exists():
-            template_path = self.atlas_dir / "SUIT_template.nii"
+            raise FileNotFoundError(f"Template file not found in {self.atlas_dir}")
         if not labels_path.exists():
-            labels_path = self.atlas_dir / "SUIT_labels.nii"
+            raise FileNotFoundError(f"Labels file not found in {self.atlas_dir}")
 
         template_img = nib.load(template_path)
         template_data = np.asarray(template_img.get_fdata(), dtype=np.float32)
@@ -320,22 +348,28 @@ class AtlasProcessor:
         Extract a binary mask for a tissue type.
 
         Args:
-            tissue_type: One of "cerebellum", "brainstem", "ventricle", "all".
+            tissue_type: One of "cerebellum", "lobules", "nuclei", "all".
 
         Returns:
             Binary mask array.
         """
         labels = self.atlas.labels
 
-        if tissue_type == "cerebellum":
-            # Labels 1-28 are cerebellar structures
-            mask = (labels >= 1) & (labels <= 28)
-        elif tissue_type == "brainstem":
-            mask = labels == 29
-        elif tissue_type == "ventricle":
-            mask = labels == 30
-        elif tissue_type == "all":
+        if tissue_type == "cerebellum" or tissue_type == "all":
+            # All cerebellar structures (lobules + nuclei)
             mask = labels > 0
+        elif tissue_type == "lobules":
+            # Labels 1-28 are cerebellar lobules
+            mask = (labels >= 1) & (labels <= 28)
+        elif tissue_type == "nuclei":
+            # Labels 29-34 are deep cerebellar nuclei
+            mask = (labels >= 29) & (labels <= 34)
+        elif tissue_type == "brainstem":
+            # Not in standard SUIT atlas, return empty mask
+            mask = np.zeros_like(labels, dtype=bool)
+        elif tissue_type == "ventricle":
+            # Not in standard SUIT atlas, return empty mask
+            mask = np.zeros_like(labels, dtype=bool)
         else:
             raise ValueError(f"Unknown tissue type: {tissue_type}")
 
