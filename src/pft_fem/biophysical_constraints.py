@@ -2,16 +2,21 @@
 Biophysical constraints module for realistic brain tissue modeling.
 
 This module provides:
-- Integration with SUITPy for cerebellar atlas access
-- Tissue segmentation (white/gray matter, CSF) from MNI atlases
+- Tissue segmentation (white/gray matter, CSF) from ICBM-152 MNI atlases
 - Fiber orientation data from JHU DTI atlas
-- Spatial transformations between MNI and SUIT spaces
+- Posterior fossa region masking (cerebellum + brainstem)
 - Anisotropic material properties based on tissue microstructure
+- Optional SUIT space transformation for cerebellar-focused analysis
+
+Default configuration:
+- Template: ICBM-152 in MNI space
+- Tumor origin: MNI coordinates [1, -61, -34] (vermis)
+- Modeled region: Posterior fossa (cerebellum + brainstem only)
 
 References:
-- SUIT Atlas: Diedrichsen et al., NeuroImage 2006
-- JHU DTI Atlas: Mori et al., MRI Atlas of Human White Matter, 2005
 - ICBM-152: Fonov et al., NeuroImage 2011
+- JHU DTI Atlas: Mori et al., MRI Atlas of Human White Matter, 2005
+- SUIT Atlas: Diedrichsen et al., NeuroImage 2006
 """
 
 from dataclasses import dataclass, field
@@ -22,6 +27,18 @@ import warnings
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+# Default tumor origin in MNI coordinates (vermis)
+DEFAULT_TUMOR_ORIGIN_MNI = np.array([1.0, -61.0, -34.0])
+
+# Posterior fossa bounding box in MNI coordinates (approximate)
+# Covers cerebellum and brainstem
+POSTERIOR_FOSSA_BOUNDS_MNI = {
+    'x_min': -55.0, 'x_max': 55.0,   # Left-right (symmetric)
+    'y_min': -100.0, 'y_max': -20.0,  # Anterior-posterior (posterior region)
+    'z_min': -70.0, 'z_max': 10.0,    # Superior-inferior (inferior region)
+}
 
 
 class BrainTissue(Enum):
@@ -1267,43 +1284,145 @@ class BiophysicalConstraints:
 
     Integrates tissue segmentation, fiber orientation, and boundary conditions
     to provide physically realistic material properties for the FEM solver.
+
+    Default configuration uses ICBM-152 MNI space with modeling restricted
+    to the posterior fossa (cerebellum + brainstem).
+
+    Attributes:
+        tumor_origin: Default tumor seed location in MNI coordinates
+        posterior_fossa_only: If True, only model brainstem and cerebellum
     """
+
+    # Default tumor origin: vermis in MNI space
+    DEFAULT_TUMOR_ORIGIN = DEFAULT_TUMOR_ORIGIN_MNI
 
     def __init__(
         self,
         suit_dir: Optional[Path] = None,
         fsl_dir: Optional[Path] = None,
-        use_suit_space: bool = True,
+        use_suit_space: bool = False,  # Default to MNI/ICBM152 space
+        posterior_fossa_only: bool = True,  # Only model cerebellum + brainstem
+        tumor_origin: Optional[NDArray[np.float64]] = None,
     ):
         """
         Initialize biophysical constraints.
 
         Args:
-            suit_dir: Path to SUIT atlas directory
-            fsl_dir: Path to FSL installation
-            use_suit_space: If True, resample MNI data to SUIT space
+            suit_dir: Path to SUIT atlas directory (optional)
+            fsl_dir: Path to FSL installation (optional, uses FSLDIR env var)
+            use_suit_space: If True, resample MNI data to SUIT space.
+                           Default is False (use ICBM-152 MNI space).
+            posterior_fossa_only: If True, only include cerebellum and brainstem
+                                 tissues in the model. Default is True.
+            tumor_origin: Tumor seed location in MNI coordinates.
+                         Default is [1, -61, -34] (vermis).
         """
         self.suit = SUITPyIntegration(suit_dir)
         self.mni = MNIAtlasLoader(fsl_dir)
         self.transformer = SpaceTransformer(self.suit, self.mni)
         self.use_suit_space = use_suit_space
+        self.posterior_fossa_only = posterior_fossa_only
+
+        # Set tumor origin (default: vermis in MNI space)
+        self.tumor_origin = tumor_origin if tumor_origin is not None else self.DEFAULT_TUMOR_ORIGIN.copy()
 
         self._segmentation: Optional[TissueSegmentation] = None
         self._fibers: Optional[FiberOrientation] = None
         self._skull_boundary: Optional[NDArray[np.bool_]] = None
+        self._posterior_fossa_mask: Optional[NDArray[np.bool_]] = None
 
     def load_all_constraints(self) -> None:
         """Load all biophysical constraint data."""
+        if self.posterior_fossa_only:
+            self.compute_posterior_fossa_mask()
         self.load_tissue_segmentation()
         self.load_fiber_orientation()
         self.compute_skull_boundary()
 
+    def compute_posterior_fossa_mask(self) -> NDArray[np.bool_]:
+        """
+        Compute mask for posterior fossa region (cerebellum + brainstem).
+
+        The posterior fossa is defined by anatomical bounds in MNI space,
+        covering the cerebellum and brainstem while excluding supratentorial
+        structures.
+
+        Returns:
+            Boolean mask indicating posterior fossa voxels
+        """
+        if self._posterior_fossa_mask is not None:
+            return self._posterior_fossa_mask
+
+        # Get the shape and affine from MNI loader
+        shape = self.mni.MNI_SHAPE
+        voxel_size = self.mni.MNI_VOXEL_SIZE
+
+        # Create coordinate grids in MNI physical space
+        # Standard MNI affine: origin at AC, 1mm isotropic
+        # Voxel [91, 109, 91] corresponds to [0, 0, 0] in MNI space for 182x218x182 template
+        center_voxel = np.array([shape[0] // 2, shape[1] // 2, shape[2] // 2])
+
+        mask = np.zeros(shape, dtype=np.bool_)
+
+        bounds = POSTERIOR_FOSSA_BOUNDS_MNI
+
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                for k in range(shape[2]):
+                    # Convert voxel to MNI coordinates
+                    mni_x = (i - center_voxel[0]) * voxel_size[0]
+                    mni_y = (j - center_voxel[1]) * voxel_size[1]
+                    mni_z = (k - center_voxel[2]) * voxel_size[2]
+
+                    # Check if within posterior fossa bounds
+                    in_bounds = (
+                        bounds['x_min'] <= mni_x <= bounds['x_max'] and
+                        bounds['y_min'] <= mni_y <= bounds['y_max'] and
+                        bounds['z_min'] <= mni_z <= bounds['z_max']
+                    )
+
+                    if in_bounds:
+                        mask[i, j, k] = True
+
+        self._posterior_fossa_mask = mask
+        return self._posterior_fossa_mask
+
+    def get_posterior_fossa_bounds(self) -> Dict[str, float]:
+        """Get the MNI coordinate bounds for the posterior fossa region."""
+        return POSTERIOR_FOSSA_BOUNDS_MNI.copy()
+
+    def is_in_posterior_fossa(self, mni_coords: NDArray[np.float64]) -> bool:
+        """
+        Check if MNI coordinates are within the posterior fossa.
+
+        Args:
+            mni_coords: Coordinates in MNI space [x, y, z]
+
+        Returns:
+            True if coordinates are within posterior fossa bounds
+        """
+        bounds = POSTERIOR_FOSSA_BOUNDS_MNI
+        return (
+            bounds['x_min'] <= mni_coords[0] <= bounds['x_max'] and
+            bounds['y_min'] <= mni_coords[1] <= bounds['y_max'] and
+            bounds['z_min'] <= mni_coords[2] <= bounds['z_max']
+        )
+
     def load_tissue_segmentation(self) -> TissueSegmentation:
-        """Load and optionally resample tissue segmentation."""
+        """
+        Load tissue segmentation, optionally restricted to posterior fossa.
+
+        If posterior_fossa_only is True, tissues outside the cerebellum and
+        brainstem region are masked out (set to background).
+        """
         if self._segmentation is not None:
             return self._segmentation
 
         mni_seg = self.mni.load_tissue_segmentation()
+
+        # Apply posterior fossa mask if requested
+        if self.posterior_fossa_only:
+            mni_seg = self._apply_posterior_fossa_mask(mni_seg)
 
         if self.use_suit_space:
             self._segmentation = self.transformer.resample_segmentation_to_suit(mni_seg)
@@ -1311,6 +1430,60 @@ class BiophysicalConstraints:
             self._segmentation = mni_seg
 
         return self._segmentation
+
+    def _apply_posterior_fossa_mask(
+        self,
+        segmentation: TissueSegmentation,
+    ) -> TissueSegmentation:
+        """
+        Apply posterior fossa mask to tissue segmentation.
+
+        Sets all tissues outside the posterior fossa to background.
+
+        Args:
+            segmentation: Full brain tissue segmentation
+
+        Returns:
+            Tissue segmentation restricted to posterior fossa
+        """
+        pf_mask = self.compute_posterior_fossa_mask()
+
+        # Ensure mask matches segmentation shape
+        if pf_mask.shape != segmentation.labels.shape:
+            from scipy import ndimage
+            # Resample mask to match segmentation
+            zoom_factors = np.array(segmentation.labels.shape) / np.array(pf_mask.shape)
+            pf_mask = ndimage.zoom(pf_mask.astype(float), zoom_factors, order=0) > 0.5
+
+        # Apply mask to labels
+        masked_labels = segmentation.labels.copy()
+        masked_labels[~pf_mask] = BrainTissue.BACKGROUND.value
+
+        # Apply mask to probability maps
+        masked_wm = None
+        masked_gm = None
+        masked_csf = None
+
+        if segmentation.wm_probability is not None:
+            masked_wm = segmentation.wm_probability.copy()
+            masked_wm[~pf_mask] = 0.0
+
+        if segmentation.gm_probability is not None:
+            masked_gm = segmentation.gm_probability.copy()
+            masked_gm[~pf_mask] = 0.0
+
+        if segmentation.csf_probability is not None:
+            masked_csf = segmentation.csf_probability.copy()
+            masked_csf[~pf_mask] = 0.0
+
+        return TissueSegmentation(
+            labels=masked_labels,
+            wm_probability=masked_wm,
+            gm_probability=masked_gm,
+            csf_probability=masked_csf,
+            affine=segmentation.affine,
+            voxel_size=segmentation.voxel_size,
+        )
 
     def load_fiber_orientation(self) -> FiberOrientation:
         """Load and optionally resample fiber orientation."""

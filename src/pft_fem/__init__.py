@@ -29,6 +29,8 @@ from .biophysical_constraints import (
     SUITPyIntegration,
     MNIAtlasLoader,
     SpaceTransformer,
+    DEFAULT_TUMOR_ORIGIN_MNI,
+    POSTERIOR_FOSSA_BOUNDS_MNI,
 )
 
 __all__ = [
@@ -62,4 +64,7 @@ __all__ = [
     "SUITPyIntegration",
     "MNIAtlasLoader",
     "SpaceTransformer",
+    # Default parameters
+    "DEFAULT_TUMOR_ORIGIN_MNI",
+    "POSTERIOR_FOSSA_BOUNDS_MNI",
 ]
