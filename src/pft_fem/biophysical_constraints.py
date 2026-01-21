@@ -600,12 +600,12 @@ class MNIAtlasLoader:
 
     Supports:
     - ICBM152 tissue probability maps (GM, WM, CSF)
-    - JHU DTI atlas for fiber orientation
+    - HCP1065 DTI atlas for fiber orientation
     - FSL atlas integration
 
     References:
     - ICBM152: http://www.bic.mni.mcgill.ca/ServicesAtlases/ICBM152NLin2009
-    - JHU DTI: Mori et al., MRI Atlas of Human White Matter, 2005
+    - HCP1065 DTI: Warrington et al., FSL (derived from Human Connectome Project)
     """
 
     # Standard MNI152 template dimensions
@@ -616,10 +616,16 @@ class MNIAtlasLoader:
     FSL_TISSUE_PRIOR_PATH = "standard/tissuepriors"
     FSL_JHU_ATLAS_PATH = "atlases/JHU"
 
+    # Default paths to bundled atlas files
+    DEFAULT_MNI_DIR = Path(__file__).parent.parent.parent / "data" / "atlases" / "MNI152"
+    DEFAULT_DTI_DIR = Path(__file__).parent.parent.parent / "data" / "atlases" / "HCP1065_DTI"
+
     def __init__(
         self,
         fsl_dir: Optional[Path] = None,
         mni_template_dir: Optional[Path] = None,
+        dti_template_dir: Optional[Path] = None,
+        use_bundled: bool = True,
     ):
         """
         Initialize MNI atlas loader.
@@ -627,10 +633,15 @@ class MNIAtlasLoader:
         Args:
             fsl_dir: Path to FSL installation directory (e.g., /usr/local/fsl).
                     If None, attempts to detect from FSLDIR environment variable.
-            mni_template_dir: Alternative path to MNI templates.
+            mni_template_dir: Alternative path to MNI tissue templates.
+            dti_template_dir: Alternative path to DTI templates.
+            use_bundled: If True and templates not found elsewhere, use bundled
+                        atlas files from the data/atlases directory.
         """
         self.fsl_dir = self._find_fsl_dir(fsl_dir)
         self.mni_template_dir = Path(mni_template_dir) if mni_template_dir else None
+        self.dti_template_dir = Path(dti_template_dir) if dti_template_dir else None
+        self.use_bundled = use_bundled
         self._cached_segmentation: Optional[TissueSegmentation] = None
         self._cached_fibers: Optional[FiberOrientation] = None
 
@@ -771,11 +782,57 @@ class MNIAtlasLoader:
         )
 
     def _load_alternative_segmentation(self) -> Optional[TissueSegmentation]:
-        """Load segmentation from alternative locations."""
-        if self.mni_template_dir is None:
+        """Load segmentation from alternative or bundled locations."""
+        try:
+            import nibabel as nib
+        except ImportError:
             return None
 
-        # Implementation would load from user-specified directory
+        # Try user-specified directory first
+        search_dirs = []
+        if self.mni_template_dir is not None:
+            search_dirs.append(Path(self.mni_template_dir))
+
+        # Try bundled files
+        if self.use_bundled and self.DEFAULT_MNI_DIR.exists():
+            search_dirs.append(self.DEFAULT_MNI_DIR)
+
+        for template_dir in search_dirs:
+            if not template_dir.exists():
+                continue
+
+            # Try to load bundled MNI152 files (from Jfortin1/MNITemplate)
+            seg_path = template_dir / "MNI152_T1_1mm_Brain_FAST_seg.nii.gz"
+            pve0_path = template_dir / "MNI152_T1_1mm_Brain_FAST_pve_0.nii.gz"  # CSF
+            pve1_path = template_dir / "MNI152_T1_1mm_Brain_FAST_pve_1.nii.gz"  # GM
+            pve2_path = template_dir / "MNI152_T1_1mm_Brain_FAST_pve_2.nii.gz"  # WM
+
+            if seg_path.exists():
+                seg_img = nib.load(seg_path)
+                labels = np.asarray(seg_img.get_fdata(), dtype=np.int32)
+                affine = seg_img.affine
+                voxel_size = tuple(np.abs(np.diag(affine)[:3]).tolist())
+
+                csf_prob = None
+                gm_prob = None
+                wm_prob = None
+
+                if pve0_path.exists():
+                    csf_prob = np.asarray(nib.load(pve0_path).get_fdata(), dtype=np.float32)
+                if pve1_path.exists():
+                    gm_prob = np.asarray(nib.load(pve1_path).get_fdata(), dtype=np.float32)
+                if pve2_path.exists():
+                    wm_prob = np.asarray(nib.load(pve2_path).get_fdata(), dtype=np.float32)
+
+                return TissueSegmentation(
+                    labels=labels,
+                    wm_probability=wm_prob,
+                    gm_probability=gm_prob,
+                    csf_probability=csf_prob,
+                    affine=affine,
+                    voxel_size=voxel_size,
+                )
+
         return None
 
     def _generate_synthetic_segmentation(self) -> TissueSegmentation:
@@ -875,56 +932,70 @@ class MNIAtlasLoader:
         return fibers
 
     def _load_jhu_dti_atlas(self) -> Optional[FiberOrientation]:
-        """Load JHU DTI atlas from FSL."""
-        if self.fsl_dir is None:
-            return None
-
+        """Load DTI atlas from FSL or bundled HCP1065 files."""
         try:
             import nibabel as nib
         except ImportError:
             return None
 
-        jhu_dir = self.fsl_dir / "data" / "atlases" / "JHU"
+        # Build list of directories to search
+        search_dirs = []
 
-        if not jhu_dir.exists():
-            return None
+        # User-specified DTI directory
+        if self.dti_template_dir is not None:
+            search_dirs.append(Path(self.dti_template_dir))
 
-        # Load FA image
-        fa_path = jhu_dir / "JHU-ICBM-FA-1mm.nii.gz"
-        if not fa_path.exists():
-            fa_path = jhu_dir / "JHU-ICBM-FA-2mm.nii.gz"
+        # FSL JHU atlas
+        if self.fsl_dir is not None:
+            search_dirs.append(self.fsl_dir / "data" / "atlases" / "JHU")
 
-        fa_data = None
-        affine = None
+        # Bundled HCP1065 DTI atlas
+        if self.use_bundled and self.DEFAULT_DTI_DIR.exists():
+            search_dirs.append(self.DEFAULT_DTI_DIR)
 
-        if fa_path.exists():
-            fa_img = nib.load(fa_path)
-            fa_data = np.asarray(fa_img.get_fdata(), dtype=np.float32)
-            affine = fa_img.affine
+        for dti_dir in search_dirs:
+            if not dti_dir.exists():
+                continue
 
-        # Try to load tensor/vector data
-        # FSL stores eigenvectors in separate files
-        v1_path = jhu_dir / "JHU-ICBM-V1-1mm.nii.gz"
+            # Try HCP1065 naming convention (bundled files)
+            fa_path = dti_dir / "FSL_HCP1065_FA_1mm.nii.gz"
+            v1_path = dti_dir / "FSL_HCP1065_V1_1mm.nii.gz"
 
-        vectors = None
-        if v1_path.exists():
-            v1_img = nib.load(v1_path)
-            vectors = np.asarray(v1_img.get_fdata(), dtype=np.float64)
-            if affine is None:
-                affine = v1_img.affine
+            # Fall back to JHU naming convention
+            if not fa_path.exists():
+                fa_path = dti_dir / "JHU-ICBM-FA-1mm.nii.gz"
+            if not fa_path.exists():
+                fa_path = dti_dir / "JHU-ICBM-FA-2mm.nii.gz"
+            if not v1_path.exists():
+                v1_path = dti_dir / "JHU-ICBM-V1-1mm.nii.gz"
 
-        if vectors is None and fa_data is not None:
-            # Generate synthetic directions based on FA
-            vectors = self._estimate_fibers_from_fa(fa_data)
+            fa_data = None
+            affine = None
+            vectors = None
 
-        if vectors is None:
-            return None
+            if fa_path.exists():
+                fa_img = nib.load(fa_path)
+                fa_data = np.asarray(fa_img.get_fdata(), dtype=np.float32)
+                affine = fa_img.affine
 
-        return FiberOrientation(
-            vectors=vectors,
-            fractional_anisotropy=fa_data if fa_data is not None else np.ones(vectors.shape[:3], dtype=np.float32) * 0.5,
-            affine=affine,
-        )
+            if v1_path.exists():
+                v1_img = nib.load(v1_path)
+                vectors = np.asarray(v1_img.get_fdata(), dtype=np.float64)
+                if affine is None:
+                    affine = v1_img.affine
+
+            if vectors is None and fa_data is not None:
+                # Generate synthetic directions based on FA
+                vectors = self._estimate_fibers_from_fa(fa_data)
+
+            if vectors is not None:
+                return FiberOrientation(
+                    vectors=vectors,
+                    fractional_anisotropy=fa_data if fa_data is not None else np.ones(vectors.shape[:3], dtype=np.float32) * 0.5,
+                    affine=affine,
+                )
+
+        return None
 
     def _estimate_fibers_from_fa(
         self,
