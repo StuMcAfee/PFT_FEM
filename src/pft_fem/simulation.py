@@ -163,6 +163,24 @@ class MRISimulator:
         properties = self.tumor_params.to_material_properties()
         self.solver = TumorGrowthSolver(self.mesh, properties)
 
+    def _create_initial_state(self) -> TumorState:
+        """
+        Create the initial tumor state based on tumor parameters.
+
+        Returns:
+            Initial TumorState with seed tumor.
+        """
+        if self.mesh is None:
+            self.setup()
+
+        seed_center = np.array(self.tumor_params.center)
+        return TumorState.initial(
+            mesh=self.mesh,
+            seed_center=seed_center,
+            seed_radius=self.tumor_params.initial_radius,
+            seed_density=self.tumor_params.initial_density,
+        )
+
     def simulate_growth(
         self,
         duration_days: float = 30.0,

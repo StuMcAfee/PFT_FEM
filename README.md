@@ -1030,33 +1030,227 @@ print(f"Generated {len(result.mri_images)} MRI sequences")
 
 ---
 
+## Biophysical Constraints
+
+The simulation incorporates realistic biophysical constraints based on literature values for brain tissue mechanics and tumor biology.
+
+### Tissue-Specific Material Properties
+
+Different brain tissues have distinct mechanical and diffusion properties:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TISSUE-SPECIFIC BIOPHYSICAL PARAMETERS                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  MECHANICAL PROPERTIES (Stiffness Multipliers)                              │
+│  ═════════════════════════════════════════════                              │
+│                                                                             │
+│  Tissue Type      │ Stiffness │ Effective E │ Biological Basis              │
+│  ─────────────────┼───────────┼─────────────┼─────────────────────────────  │
+│  Gray Matter      │    1.0×   │   3000 Pa   │ Baseline brain tissue         │
+│  White Matter     │    1.2×   │   3600 Pa   │ Fiber tracts add stiffness    │
+│  CSF              │    0.01×  │     30 Pa   │ Fluid (nearly incompressible) │
+│  Tumor            │    2.0×   │   6000 Pa   │ Dense cell packing            │
+│  Edema            │    0.5×   │   1500 Pa   │ Fluid accumulation softens    │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  DIFFUSION PROPERTIES (Migration Multipliers)                               │
+│  ════════════════════════════════════════════                               │
+│                                                                             │
+│  Tissue Type      │ Diffusion │ Effective D │ Biological Basis              │
+│  ─────────────────┼───────────┼─────────────┼─────────────────────────────  │
+│  Gray Matter      │    1.0×   │ 0.15 mm²/d  │ Baseline infiltration         │
+│  White Matter     │    2.0×   │ 0.30 mm²/d  │ Faster along fiber tracts     │
+│  CSF              │    0.1×   │ 0.015 mm²/d │ Barrier to tumor invasion     │
+│  Tumor            │    0.5×   │ 0.075 mm²/d │ Dense tissue slows spread     │
+│  Edema            │    1.5×   │ 0.225 mm²/d │ Loosened ECM aids migration   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Base Material Parameters
+
+| Parameter | Default Value | Units | Description |
+|-----------|---------------|-------|-------------|
+| Young's Modulus (E) | 3000 | Pa | Brain tissue stiffness |
+| Poisson Ratio (ν) | 0.45 | - | Nearly incompressible |
+| Proliferation Rate (ρ) | 0.012 | 1/day | Cell division rate |
+| Diffusion Coefficient (D) | 0.15 | mm²/day | Cell migration rate |
+| Carrying Capacity (K) | 1.0 | - | Maximum cell density |
+| Growth Stress Coefficient | 0.1 | Pa | Stress per unit tumor density |
+
+### Tumor Region Classification
+
+The simulation automatically classifies tumor regions based on cell density:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         TUMOR REGION CLASSIFICATION                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                        Cross-Section View                                   │
+│                                                                             │
+│                    ┌─────────────────────────┐                              │
+│                    │ ░░░░░░░░░░░░░░░░░░░░░░░ │                              │
+│                    │ ░░░░░▒▒▒▒▒▒▒▒▒▒▒░░░░░░░ │  ░ Normal tissue            │
+│                    │ ░░░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░░░░░ │  ▒ Peritumoral edema        │
+│                    │ ░░▒▒▒▒▓▓▓▓▓▓▓▓▓▒▒▒▒░░░░ │    (density < 0.1)          │
+│                    │ ░░▒▒▒▓▓▓▓▓▓▓▓▓▓▓▒▒▒░░░░ │  ▓ Enhancing rim            │
+│                    │ ░░▒▒▓▓▓▓███████▓▓▓▒▒░░░ │    (0.1 < density ≤ 0.5)    │
+│                    │ ░░▒▒▓▓▓███████▓▓▓▒▒▒░░░ │  █ Tumor core               │
+│                    │ ░░▒▒▒▓▓▓▓▓▓▓▓▓▓▓▒▒▒░░░░ │    (density > 0.5)          │
+│                    │ ░░░▒▒▒▒▓▓▓▓▓▓▓▒▒▒▒░░░░░ │  ■ Necrotic center          │
+│                    │ ░░░░░▒▒▒▒▒▒▒▒▒▒▒░░░░░░░ │    (density > 0.9)          │
+│                    │ ░░░░░░░░░░░░░░░░░░░░░░░ │                              │
+│                    └─────────────────────────┘                              │
+│                                                                             │
+│  Region           │ Density Threshold │ MRI Characteristics                 │
+│  ─────────────────┼───────────────────┼───────────────────────────────────  │
+│  Necrotic Core    │ > 0.9             │ T1 hypo, T2 hyper, no enhancement   │
+│  Tumor Core       │ > 0.5             │ T1 iso/hypo, T2 hyper               │
+│  Enhancing Rim    │ 0.1 - 0.5         │ Strong contrast enhancement         │
+│  Edema            │ < 0.1 (dilated)   │ T2/FLAIR hyperintense               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Spatial Transforms
+
+The simulation generates spatial transform outputs that describe how the tumor deforms surrounding tissue.
+
+### Displacement Field
+
+The 3D displacement field `u(x,y,z)` represents how each point in the brain moves due to tumor mass effect:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          DISPLACEMENT FIELD OUTPUT                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Structure: 4D NIfTI volume (X × Y × Z × 3)                                 │
+│  Units: millimeters (mm)                                                    │
+│  Components: [dx, dy, dz] at each voxel                                     │
+│                                                                             │
+│  Visualization (2D slice):                                                  │
+│                                                                             │
+│         Before Tumor              After Tumor Growth                        │
+│    ┌─────────────────────┐    ┌─────────────────────┐                       │
+│    │ · · · · · · · · · · │    │ · · · · · · · · · · │                       │
+│    │ · · · · · · · · · · │    │ · · ↖ ↑ ↑ ↑ ↗ · · · │                       │
+│    │ · · · · · · · · · · │    │ · ← ↖ ↑ ↑ ↑ ↗ → · · │                       │
+│    │ · · · · · · · · · · │    │ · ← ← █████ → → · · │   █ = Tumor           │
+│    │ · · · · · · · · · · │ ─► │ · ← ← █████ → → · · │   → = Displacement    │
+│    │ · · · · · · · · · · │    │ · ← ↙ ↓ ↓ ↓ ↘ → · · │       vectors         │
+│    │ · · · · · · · · · · │    │ · · ↙ ↓ ↓ ↓ ↘ · · · │                       │
+│    │ · · · · · · · · · · │    │ · · · · · · · · · · │                       │
+│    └─────────────────────┘    └─────────────────────┘                       │
+│                                                                             │
+│  Key Metrics:                                                               │
+│  • Max displacement: typically 1-5 mm for moderate tumors                   │
+│  • Displacement decays with distance from tumor                             │
+│  • Boundary conditions: fixed at domain edges                               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Deformed Atlas
+
+The deformed atlas applies the displacement field to the original anatomical labels:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           DEFORMED ATLAS OUTPUT                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│     Original Atlas              Deformed Atlas                              │
+│  ┌─────────────────────┐    ┌─────────────────────┐                         │
+│  │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │    │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │                         │
+│  │ ▓▓▓░░░░░░░░░░░▓▓▓▓▓ │    │ ▓▓▓░░░░░░░░░░░▓▓▓▓▓ │                         │
+│  │ ▓▓░░░░░░░░░░░░░▓▓▓▓ │    │ ▓░░░░░░   ░░░░░░▓▓▓ │   Tumor pushes          │
+│  │ ▓░░░░░░░░░░░░░░░▓▓▓ │ ─► │ ░░░░░░ ███ ░░░░░░▓▓ │   tissue outward        │
+│  │ ▓░░░░░░░░░░░░░░░▓▓▓ │    │ ░░░░░░ ███ ░░░░░░▓▓ │                         │
+│  │ ▓▓░░░░░░░░░░░░░▓▓▓▓ │    │ ▓░░░░░░   ░░░░░░▓▓▓ │   ░ = Cerebellum        │
+│  │ ▓▓▓░░░░░░░░░░░▓▓▓▓▓ │    │ ▓▓▓░░░░░░░░░░░▓▓▓▓▓ │   ▓ = Brainstem         │
+│  │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │    │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │   █ = Tumor             │
+│  └─────────────────────┘    └─────────────────────┘                         │
+│                                                                             │
+│  Application: Track how tumor growth affects anatomical structures          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Coordinate Transforms
+
+The simulation uses affine transformations to convert between coordinate systems:
+
+| Transform | Description | Formula |
+|-----------|-------------|---------|
+| Voxel → Physical | Convert voxel indices to mm | `p = A × v` |
+| Physical → Voxel | Convert mm to voxel indices | `v = A⁻¹ × p` |
+| Apply Deformation | Warp image by displacement | `I'(x) = I(x - u(x))` |
+
+**Output Files:**
+
+| File | Format | Description |
+|------|--------|-------------|
+| `*_displacement.nii.gz` | float32 (X,Y,Z,3) | 3D displacement field in mm |
+| `*_deformed_atlas.nii.gz` | float32 | Atlas with deformation applied |
+| `*_jacobian.nii.gz` | float32 | Jacobian determinant (volume change) |
+
+---
+
 ## Physical Models
 
 ### Reaction-Diffusion Equation (Tumor Growth)
 
-The tumor cell density `c(x,t)` evolves according to:
+The tumor cell density `c(x,t)` evolves according to the Fisher-Kolmogorov equation:
 
 ```
-∂c/∂t = D∇²c + ρc(1 - c/K)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    ∂c/∂t = D∇²c + ρc(1 - c/K)                               │
+│                            ─────   ───────────                              │
+│                           Diffusion   Logistic                              │
+│                            (spread)   Growth                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Where:
-- `D` = diffusion coefficient (mm²/day)
+- `c` = tumor cell density (0 to 1, normalized)
+- `D` = diffusion coefficient (mm²/day) — varies by tissue type
 - `ρ` = proliferation rate (1/day)
 - `K` = carrying capacity (normalized to 1.0)
 
+**Numerical Method:** Operator splitting with implicit Euler for diffusion, explicit Euler for reaction.
+
 ### Linear Elasticity (Tissue Deformation)
 
-The displacement field `u(x)` satisfies:
+The displacement field `u(x)` satisfies the static equilibrium equation:
 
 ```
-∇·σ + f = 0
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                           ∇·σ + f = 0                                       │
+│                                                                             │
+│  where:                                                                     │
+│    σ = λ(∇·u)I + μ(∇u + ∇uᵀ)     (Cauchy stress tensor)                     │
+│    f = α · c · ∇c                 (growth-induced body force)               │
+│                                                                             │
+│  Lamé parameters from Young's modulus E and Poisson ratio ν:                │
+│    λ = Eν / ((1+ν)(1-2ν))                                                   │
+│    μ = E / (2(1+ν))                                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Where:
-- `σ = λ(∇·u)I + μ(∇u + ∇uᵀ)` (stress tensor)
-- `λ, μ` = Lamé parameters (derived from E, ν)
-- `f` = growth-induced force
+**Boundary Conditions:** Fixed (Dirichlet) at domain boundaries — displacement = 0.
+
+**Numerical Method:** FEM with linear tetrahedral elements, conjugate gradient solver.
 
 ### MRI Signal Model
 
@@ -1071,6 +1265,18 @@ For FLAIR (inversion recovery):
 ```
 S = PD × |1 - 2e^(-TI/T1) + e^(-TR/T1)| × e^(-TE/T2)
 ```
+
+**Tissue Relaxation Times (at 1.5T):**
+
+| Tissue | T1 (ms) | T2 (ms) | PD |
+|--------|---------|---------|-----|
+| Gray Matter | 1200 | 80 | 0.85 |
+| White Matter | 800 | 70 | 0.75 |
+| CSF | 4000 | 2000 | 1.00 |
+| Tumor | 1400 | 100 | 0.90 |
+| Edema | 1500 | 120 | 0.92 |
+| Necrosis | 2000 | 150 | 0.88 |
+| Enhancement | 400 | 80 | 0.85 |
 
 ---
 
