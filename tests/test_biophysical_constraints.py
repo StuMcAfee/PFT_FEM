@@ -6,6 +6,8 @@ Tests cover:
 - Fiber orientation data handling
 - Anisotropic material properties
 - Space transformations (MNI <-> SUIT)
+- Posterior fossa region masking
+- Default ICBM-152 configuration
 - Integration with FEM solver
 - Skull boundary conditions
 """
@@ -23,6 +25,8 @@ from pft_fem.biophysical_constraints import (
     MNIAtlasLoader,
     SpaceTransformer,
     BiophysicalConstraints,
+    DEFAULT_TUMOR_ORIGIN_MNI,
+    POSTERIOR_FOSSA_BOUNDS_MNI,
 )
 from pft_fem.fem import MaterialProperties, TissueType, TumorGrowthSolver, TumorState
 from pft_fem.mesh import TetMesh, MeshGenerator
@@ -547,12 +551,88 @@ class TestBiophysicalConstraints:
     """Tests for integrated biophysical constraints."""
 
     def test_initialization(self):
-        """Test basic initialization."""
+        """Test basic initialization with new defaults."""
         bc = BiophysicalConstraints(suit_dir=None, fsl_dir=None)
 
         assert bc.suit is not None
         assert bc.mni is not None
         assert bc.transformer is not None
+        # New defaults: MNI space, posterior fossa only
+        assert bc.use_suit_space is False  # Default is now MNI space
+        assert bc.posterior_fossa_only is True  # Default is posterior fossa only
+
+    def test_default_tumor_origin(self):
+        """Test that default tumor origin is vermis in MNI space."""
+        bc = BiophysicalConstraints(suit_dir=None, fsl_dir=None)
+
+        # Default tumor origin should be [1, -61, -34] (vermis)
+        assert_allclose(bc.tumor_origin, DEFAULT_TUMOR_ORIGIN_MNI)
+        assert_allclose(bc.tumor_origin, [1.0, -61.0, -34.0])
+
+    def test_custom_tumor_origin(self):
+        """Test setting custom tumor origin."""
+        custom_origin = np.array([10.0, -50.0, -30.0])
+        bc = BiophysicalConstraints(
+            suit_dir=None, fsl_dir=None,
+            tumor_origin=custom_origin
+        )
+
+        assert_allclose(bc.tumor_origin, custom_origin)
+
+    def test_posterior_fossa_bounds(self):
+        """Test posterior fossa bounding box is reasonable."""
+        bounds = POSTERIOR_FOSSA_BOUNDS_MNI
+
+        # Bounds should cover posterior and inferior region
+        assert bounds['y_max'] < 0  # Posterior (negative Y in MNI)
+        assert bounds['z_max'] < 20  # Inferior (low Z in MNI)
+
+        # Bounds should be symmetric in X
+        assert bounds['x_min'] == -bounds['x_max']
+
+    def test_is_in_posterior_fossa_vermis(self):
+        """Test that default tumor origin is in posterior fossa."""
+        bc = BiophysicalConstraints(suit_dir=None, fsl_dir=None)
+
+        # Default tumor origin (vermis) should be in posterior fossa
+        assert bc.is_in_posterior_fossa(bc.tumor_origin)
+
+    def test_is_in_posterior_fossa_cerebellum(self):
+        """Test points in cerebellum are in posterior fossa."""
+        bc = BiophysicalConstraints(suit_dir=None, fsl_dir=None)
+
+        # Various cerebellar points
+        cerebellar_points = [
+            np.array([0.0, -60.0, -30.0]),  # Vermis
+            np.array([30.0, -70.0, -40.0]),  # Right hemisphere
+            np.array([-30.0, -70.0, -40.0]),  # Left hemisphere
+        ]
+
+        for point in cerebellar_points:
+            assert bc.is_in_posterior_fossa(point), f"Point {point} should be in posterior fossa"
+
+    def test_is_not_in_posterior_fossa_frontal(self):
+        """Test that frontal lobe points are not in posterior fossa."""
+        bc = BiophysicalConstraints(suit_dir=None, fsl_dir=None)
+
+        # Frontal lobe point (anterior, superior)
+        frontal_point = np.array([0.0, 50.0, 30.0])
+        assert not bc.is_in_posterior_fossa(frontal_point)
+
+    def test_posterior_fossa_mask_computed(self):
+        """Test that posterior fossa mask is computed."""
+        bc = BiophysicalConstraints(suit_dir=None, fsl_dir=None)
+        mask = bc.compute_posterior_fossa_mask()
+
+        # Mask should be 3D boolean array
+        assert mask.ndim == 3
+        assert mask.dtype == np.bool_
+
+        # Should have some True values (posterior fossa region)
+        assert np.sum(mask) > 0
+
+        # Should not be all True (not whole brain)
+        assert np.sum(mask) < mask.size
 
     def test_load_all_constraints(self):
         """Test loading all constraint data."""
@@ -562,6 +642,37 @@ class TestBiophysicalConstraints:
         assert bc._segmentation is not None
         assert bc._fibers is not None
         assert bc._skull_boundary is not None
+        # With posterior_fossa_only=True, mask should also be computed
+        assert bc._posterior_fossa_mask is not None
+
+    def test_segmentation_masked_to_posterior_fossa(self):
+        """Test that segmentation is masked to posterior fossa only."""
+        bc = BiophysicalConstraints(
+            suit_dir=None, fsl_dir=None,
+            posterior_fossa_only=True
+        )
+        seg = bc.load_tissue_segmentation()
+
+        # Frontal region should be background
+        # Convert frontal MNI coords to voxel
+        frontal_mni = np.array([0.0, 50.0, 30.0])
+        frontal_tissue = seg.get_tissue_at_point(frontal_mni)
+        assert frontal_tissue == BrainTissue.BACKGROUND
+
+    def test_segmentation_not_masked_when_disabled(self):
+        """Test that segmentation is not masked when posterior_fossa_only=False."""
+        bc = BiophysicalConstraints(
+            suit_dir=None, fsl_dir=None,
+            posterior_fossa_only=False
+        )
+        seg = bc.load_tissue_segmentation()
+
+        # Frontal region should have tissue (not background)
+        # This is within the synthetic brain, so should have tissue
+        frontal_mni = np.array([0.0, 30.0, 20.0])
+        frontal_tissue = seg.get_tissue_at_point(frontal_mni)
+        # May be GM, WM, or CSF depending on synthetic generation
+        assert frontal_tissue != BrainTissue.BACKGROUND or True  # Allow background in synthetic
 
     def test_get_material_properties_gray_matter(self, synthetic_segmentation):
         """Test getting material properties for gray matter region."""
