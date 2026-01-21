@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 from .atlas import AtlasData, AtlasProcessor
 from .mesh import TetMesh, MeshGenerator
 from .fem import TumorGrowthSolver, TumorState, MaterialProperties
+from .transforms import SpatialTransform, compute_transform_from_simulation
 
 
 class MRISequence(Enum):
@@ -92,6 +93,7 @@ class SimulationResult:
         deformed_atlas: Atlas with tumor-induced deformation.
         tumor_mask: Binary tumor mask.
         edema_mask: Binary edema mask.
+        spatial_transform: Complete spatial transform from SUIT to deformed space.
         metadata: Additional simulation metadata.
     """
 
@@ -100,6 +102,7 @@ class SimulationResult:
     deformed_atlas: NDArray[np.float32]
     tumor_mask: NDArray[np.bool_]
     edema_mask: NDArray[np.bool_]
+    spatial_transform: Optional[SpatialTransform] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -460,6 +463,55 @@ class MRISimulator:
 
         return deformed.astype(np.float32)
 
+    def _compute_spatial_transform(
+        self,
+        tumor_state: TumorState,
+    ) -> Optional[SpatialTransform]:
+        """
+        Compute the complete spatial transform from SUIT template to deformed state.
+
+        This transform encapsulates the deformation induced by tumor growth and
+        can be exported in ANTsPy-compatible formats for use in other pipelines.
+
+        Args:
+            tumor_state: Final tumor state with displacement field.
+
+        Returns:
+            SpatialTransform instance, or None if no mesh is available.
+        """
+        if self.mesh is None:
+            return None
+
+        # Skip if displacement is negligible
+        if np.max(np.abs(tumor_state.displacement)) < 0.01:
+            # Return identity transform
+            return SpatialTransform.identity(
+                shape=self.atlas.shape,
+                voxel_size=self.atlas.voxel_size,
+                affine=self.atlas.affine,
+            )
+
+        # Compute transform from FEM node displacements
+        transform = compute_transform_from_simulation(
+            displacement_at_nodes=tumor_state.displacement,
+            mesh_nodes=self.mesh.nodes,
+            volume_shape=self.atlas.shape,
+            affine=self.atlas.affine,
+            voxel_size=self.atlas.voxel_size,
+            smoothing_sigma=2.0,
+        )
+
+        # Add simulation metadata to transform
+        transform.metadata = {
+            "simulation_time_days": tumor_state.time,
+            "tumor_center": self.tumor_params.center,
+            "tumor_initial_radius": self.tumor_params.initial_radius,
+            "proliferation_rate": self.tumor_params.proliferation_rate,
+            "diffusion_rate": self.tumor_params.diffusion_rate,
+        }
+
+        return transform
+
     def run_full_pipeline(
         self,
         duration_days: float = 30.0,
@@ -505,6 +557,11 @@ class MRISimulator:
             final_state
         )
 
+        # Compute spatial transform from SUIT template to deformed state
+        if verbose:
+            print("Computing spatial transform...")
+        spatial_transform = self._compute_spatial_transform(final_state)
+
         # Compute metadata
         tumor_volume = self.solver.compute_tumor_volume(final_state)
         max_displacement = self.solver.compute_max_displacement(final_state)
@@ -521,6 +578,7 @@ class MRISimulator:
             },
             "atlas_shape": self.atlas.shape,
             "voxel_size": self.atlas.voxel_size,
+            "spatial_transform_info": spatial_transform.to_dict() if spatial_transform else None,
         }
 
         return SimulationResult(
@@ -529,5 +587,6 @@ class MRISimulator:
             deformed_atlas=deformed_atlas,
             tumor_mask=tumor_mask,
             edema_mask=edema_mask,
+            spatial_transform=spatial_transform,
             metadata=metadata,
         )

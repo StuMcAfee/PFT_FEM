@@ -296,15 +296,50 @@ class NIfTIWriter:
 
         return filepath
 
+    def write_spatial_transform(
+        self,
+        transform: "SpatialTransform",
+        base_name: str = "spatial_transform",
+        include_inverse: bool = True,
+    ) -> Dict[str, Path]:
+        """
+        Write spatial transform in ANTsPy-compatible format.
+
+        Exports the complete transform including:
+        - Displacement field (NIfTI, ANTs-compatible)
+        - Affine transform (.mat file)
+        - Inverse displacement field (optional)
+        - Jacobian determinant map
+        - Metadata (JSON)
+
+        Args:
+            transform: SpatialTransform to export.
+            base_name: Base name for output files.
+            include_inverse: Whether to export inverse transform.
+
+        Returns:
+            Dictionary mapping output type to file path.
+        """
+        from .transforms import ANTsTransformExporter
+
+        exporter = ANTsTransformExporter(self.output_dir)
+        return exporter.export_composite_transform(
+            transform,
+            base_filename=f"{self.base_name}_{base_name}",
+            include_inverse=include_inverse,
+        )
+
     def write_simulation_results(
         self,
         result: "SimulationResult",
+        export_transform: bool = True,
     ) -> Dict[str, Path]:
         """
         Write all simulation results to NIfTI files.
 
         Args:
             result: SimulationResult from MRISimulator.
+            export_transform: Whether to export the spatial transform.
 
         Returns:
             Dictionary mapping output type to file path.
@@ -331,6 +366,15 @@ class NIfTIWriter:
         paths["tumor_mask"] = self.write_mask(result.tumor_mask, "tumor_mask")
         paths["edema_mask"] = self.write_mask(result.edema_mask, "edema_mask")
 
+        # Export spatial transform (SUIT -> deformed) in ANTsPy format
+        if export_transform and result.spatial_transform is not None:
+            transform_paths = self.write_spatial_transform(
+                result.spatial_transform,
+                base_name="suit_to_deformed",
+                include_inverse=True,
+            )
+            paths.update({f"transform_{k}": v for k, v in transform_paths.items()})
+
         # Write tumor density evolution
         if len(result.tumor_states) > 1:
             # Interpolate tumor density to volumes
@@ -355,6 +399,9 @@ class NIfTIWriter:
                 serializable_meta[key] = float(value)
             elif isinstance(value, tuple):
                 serializable_meta[key] = list(value)
+            elif isinstance(value, dict):
+                # Handle nested dicts (like spatial_transform_info)
+                serializable_meta[key] = self._serialize_dict(value)
             else:
                 serializable_meta[key] = value
 
@@ -364,6 +411,24 @@ class NIfTIWriter:
         paths["metadata"] = meta_path
 
         return paths
+
+    def _serialize_dict(self, d: Dict) -> Dict:
+        """Recursively serialize dictionary values for JSON."""
+        result = {}
+        for key, value in d.items():
+            if isinstance(value, np.ndarray):
+                result[key] = value.tolist()
+            elif isinstance(value, (np.int64, np.int32)):
+                result[key] = int(value)
+            elif isinstance(value, (np.float64, np.float32)):
+                result[key] = float(value)
+            elif isinstance(value, tuple):
+                result[key] = list(value)
+            elif isinstance(value, dict):
+                result[key] = self._serialize_dict(value)
+            else:
+                result[key] = value
+        return result
 
 
 def validate_nifti(filepath: Union[str, Path]) -> Dict[str, Any]:
