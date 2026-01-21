@@ -491,8 +491,13 @@ class TumorGrowthSolver:
             for dof in range(3):
                 force[node_idx * 3 + dof] = 0.0
 
-        # Solve
-        u_flat, info = cg(self._stiffness_matrix, force, tol=1e-6, maxiter=1000)
+        # Solve using conjugate gradient
+        # Note: scipy >= 1.12 renamed 'tol' to 'rtol'
+        try:
+            u_flat, info = cg(self._stiffness_matrix, force, rtol=1e-6, maxiter=1000)
+        except TypeError:
+            # Fallback for older scipy versions
+            u_flat, info = cg(self._stiffness_matrix, force, tol=1e-6, maxiter=1000)
 
         if info != 0:
             # Fall back to direct solver

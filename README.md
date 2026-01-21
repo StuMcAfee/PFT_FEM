@@ -75,6 +75,23 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
+### Verify Installation
+
+After installation, verify that the CLI is available:
+
+```bash
+# Check that the command is installed
+pft-simulate --version
+
+# Or check via Python
+python -c "import pft_fem; print(pft_fem.__version__)"
+```
+
+> **Note:** If you get "command not found" or "not recognized", make sure:
+> 1. You ran `pip install -e .` from the project root (where `pyproject.toml` is located)
+> 2. Your Python scripts directory is in your system PATH
+> 3. You're using the same Python environment where you installed the package
+
 ### Dependencies
 
 | Package | Version | Purpose |
@@ -90,7 +107,12 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
+> **Important:** You must install the package first before using the CLI or Python API.
+> Run `pip install -e .` from the project root directory.
+
 ### Command Line
+
+After installation, the `pft-simulate` command will be available:
 
 ```bash
 # Run with default parameters (synthetic atlas, 30-day simulation)
