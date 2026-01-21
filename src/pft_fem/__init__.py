@@ -16,8 +16,8 @@ __version__ = "0.1.0"
 
 from .atlas import SUITAtlasLoader, AtlasProcessor
 from .mesh import MeshGenerator, TetMesh
-from .fem import TumorGrowthSolver, MaterialProperties, TissueType
-from .simulation import MRISimulator, TumorParameters
+from .fem import TumorGrowthSolver, MaterialProperties, TissueType, TumorState
+from .simulation import MRISimulator, TumorParameters, MRISequence, SimulationResult
 from .io import NIfTIWriter, load_nifti, save_nifti
 from .transforms import SpatialTransform, ANTsTransformExporter, compute_transform_from_simulation
 from .biophysical_constraints import (
@@ -44,9 +44,12 @@ __all__ = [
     "TumorGrowthSolver",
     "MaterialProperties",
     "TissueType",
+    "TumorState",
     # MRI simulation
     "MRISimulator",
     "TumorParameters",
+    "MRISequence",
+    "SimulationResult",
     # I/O
     "NIfTIWriter",
     "load_nifti",
