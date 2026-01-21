@@ -142,7 +142,7 @@ tumor_params = TumorParameters(
     center=(0.0, 0.0, 0.0),
     initial_radius=5.0,
     proliferation_rate=0.012,
-    diffusion_coefficient=0.15
+    diffusion_rate=0.15
 )
 
 # Run simulation
@@ -458,7 +458,7 @@ Simulates tumor evolution using coupled reaction-diffusion and mechanical equati
 │  │ center:               (x, y, z)  │ Tumor seed location in mm      │     │
 │  │ initial_radius:       float      │ Starting radius in mm          │     │
 │  │ proliferation_rate:   float      │ Growth rate (1/day)            │     │
-│  │ diffusion_coefficient: float     │ Spread rate (mm²/day)          │     │
+│  │ diffusion_rate: float     │ Spread rate (mm²/day)          │     │
 │  │ carrying_capacity:    float      │ Max cell density (normalized)  │     │
 │  └───────────────────────────────────────────────────────────────────┘     │
 │                                                                             │
@@ -534,7 +534,7 @@ from pft_fem import TumorGrowthSolver, TumorState, MaterialProperties
 
 # Initialize solver
 material = MaterialProperties(
-    youngs_modulus=3000.0,    # Pa
+    young_modulus=3000.0,      # Pa
     poisson_ratio=0.45,
     proliferation_rate=0.012,  # 1/day
     diffusion_coefficient=0.15 # mm²/day
@@ -759,7 +759,7 @@ Writes all simulation results to NIfTI format files.
 │      "center": [0.0, 0.0, 0.0],                                             │
 │      "initial_radius": 5.0,                                                 │
 │      "proliferation_rate": 0.012,                                           │
-│      "diffusion_coefficient": 0.15                                          │
+│      "diffusion_rate": 0.15                                          │
 │    },                                                                       │
 │    "atlas_shape": [91, 109, 91],                                            │
 │    "voxel_size": [2.0, 2.0, 2.0],                                           │
@@ -895,7 +895,7 @@ print(f"Generated mesh: {len(mesh.nodes)} nodes, {len(mesh.elements)} elements")
 
 # Step 3: Run Tumor Simulation
 material = MaterialProperties(
-    youngs_modulus=3000.0,
+    young_modulus=3000.0,
     poisson_ratio=0.45,
     proliferation_rate=0.012,
     diffusion_coefficient=0.15
@@ -948,7 +948,7 @@ tumor_params = TumorParameters(
     center=(5.0, -3.0, 0.0),
     initial_radius=6.0,
     proliferation_rate=0.015,
-    diffusion_coefficient=0.2
+    diffusion_rate=0.2
 )
 
 simulator = MRISimulator(atlas_data, tumor_params)
@@ -972,7 +972,7 @@ print(f"Generated {len(result.mri_images)} MRI sequences")
 | `center` | (0, 0, 0) | Within atlas bounds | Tumor seed location (mm) |
 | `initial_radius` | 5.0 | 1.0 - 20.0 | Starting radius (mm) |
 | `proliferation_rate` | 0.012 | 0.001 - 0.1 | Growth rate (1/day) |
-| `diffusion_coefficient` | 0.15 | 0.01 - 1.0 | Spread rate (mm²/day) |
+| `diffusion_rate` | 0.15 | 0.01 - 1.0 | Spread rate (mm²/day) |
 | `carrying_capacity` | 1.0 | 0.5 - 1.0 | Max cell density |
 
 ### Material Properties
@@ -1021,7 +1021,7 @@ print(f"Generated {len(result.mri_images)} MRI sequences")
     "center": [0.0, 0.0, 0.0],
     "initial_radius": 5.0,
     "proliferation_rate": 0.012,
-    "diffusion_coefficient": 0.15
+    "diffusion_rate": 0.15
   },
   "atlas_shape": [91, 109, 91],
   "voxel_size": [2.0, 2.0, 2.0]
