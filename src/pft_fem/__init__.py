@@ -19,6 +19,7 @@ from .mesh import MeshGenerator, TetMesh
 from .fem import TumorGrowthSolver, MaterialProperties, TissueType
 from .simulation import MRISimulator, TumorParameters
 from .io import NIfTIWriter, load_nifti, save_nifti
+from .transforms import SpatialTransform, ANTsTransformExporter, compute_transform_from_simulation
 from .biophysical_constraints import (
     BiophysicalConstraints,
     BrainTissue,
@@ -48,6 +49,10 @@ __all__ = [
     "NIfTIWriter",
     "load_nifti",
     "save_nifti",
+    # Spatial transforms
+    "SpatialTransform",
+    "ANTsTransformExporter",
+    "compute_transform_from_simulation",
     # Biophysical constraints
     "BiophysicalConstraints",
     "BrainTissue",
