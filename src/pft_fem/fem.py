@@ -1057,3 +1057,215 @@ class TumorGrowthSolver:
         ))
 
         return vm
+
+    # =========================================================================
+    # Serialization Methods for Precomputed Solvers
+    # =========================================================================
+
+    def save(self, directory: str) -> None:
+        """
+        Save precomputed solver state to a directory.
+
+        Saves all matrices, mesh, and precomputed data for fast loading later.
+        This avoids the expensive matrix assembly step when using default parameters.
+
+        Args:
+            directory: Directory path to save solver data.
+        """
+        import json
+        import pickle
+        from pathlib import Path
+        from .mesh import save_mesh
+
+        save_dir = Path(directory)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save mesh
+        save_mesh(self.mesh, str(save_dir / "mesh.vtu"))
+
+        # Save boundary nodes separately (not stored in meshio format)
+        np.save(save_dir / "boundary_nodes.npy", self.mesh.boundary_nodes)
+
+        # Save system matrices (scipy sparse format)
+        matrices_dir = save_dir / "matrices"
+        matrices_dir.mkdir(exist_ok=True)
+        sparse.save_npz(matrices_dir / "mass_matrix.npz", self._mass_matrix)
+        sparse.save_npz(matrices_dir / "stiffness_matrix.npz", self._stiffness_matrix)
+        sparse.save_npz(matrices_dir / "diffusion_matrix.npz", self._diffusion_matrix)
+
+        # Save precomputed element data
+        precomputed_dir = save_dir / "precomputed"
+        precomputed_dir.mkdir(exist_ok=True)
+        np.save(precomputed_dir / "element_volumes.npy", self._element_volumes)
+        with open(precomputed_dir / "shape_gradients.pkl", "wb") as f:
+            pickle.dump(self._shape_gradients, f)
+
+        # Save biophysical data if present
+        if self._node_tissues is not None:
+            np.save(precomputed_dir / "node_tissues.npy", self._node_tissues)
+        if self._node_fiber_directions is not None:
+            np.save(precomputed_dir / "node_fiber_directions.npy", self._node_fiber_directions)
+
+        # Save element properties as simplified format
+        if self._element_properties is not None:
+            elem_props_data = []
+            for props in self._element_properties:
+                elem_props_data.append({
+                    "young_modulus": props.young_modulus,
+                    "poisson_ratio": props.poisson_ratio,
+                    "proliferation_rate": props.proliferation_rate,
+                    "diffusion_coefficient": props.diffusion_coefficient,
+                    "carrying_capacity": props.carrying_capacity,
+                    "growth_stress_coefficient": props.growth_stress_coefficient,
+                    "anisotropy_ratio": props.anisotropy_ratio,
+                    "fiber_direction": props.fiber_direction.tolist() if props.fiber_direction is not None else None,
+                })
+            with open(precomputed_dir / "element_properties.json", "w") as f:
+                json.dump(elem_props_data, f)
+
+        # Save metadata
+        metadata = {
+            "version": "1.0",
+            "boundary_condition": self.boundary_condition,
+            "num_nodes": len(self.mesh.nodes),
+            "num_elements": len(self.mesh.elements),
+            "has_biophysical_constraints": self._node_tissues is not None,
+            "properties": {
+                "young_modulus": self.properties.young_modulus,
+                "poisson_ratio": self.properties.poisson_ratio,
+                "proliferation_rate": self.properties.proliferation_rate,
+                "diffusion_coefficient": self.properties.diffusion_coefficient,
+                "carrying_capacity": self.properties.carrying_capacity,
+                "growth_stress_coefficient": self.properties.growth_stress_coefficient,
+                "anisotropy_ratio": self.properties.anisotropy_ratio,
+            }
+        }
+        with open(save_dir / "solver_metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    @classmethod
+    def load(cls, directory: str) -> "TumorGrowthSolver":
+        """
+        Load precomputed solver from a directory.
+
+        This bypasses expensive matrix assembly by loading pre-built matrices.
+
+        Args:
+            directory: Directory containing saved solver data.
+
+        Returns:
+            TumorGrowthSolver with precomputed matrices loaded.
+        """
+        import json
+        import pickle
+        from pathlib import Path
+        from .mesh import load_mesh
+
+        load_dir = Path(directory)
+
+        if not load_dir.exists():
+            raise FileNotFoundError(f"Solver directory not found: {directory}")
+
+        # Load metadata
+        with open(load_dir / "solver_metadata.json") as f:
+            metadata = json.load(f)
+
+        # Load mesh
+        mesh = load_mesh(str(load_dir / "mesh.vtu"))
+
+        # Load boundary nodes
+        boundary_nodes_path = load_dir / "boundary_nodes.npy"
+        if boundary_nodes_path.exists():
+            mesh.boundary_nodes = np.load(boundary_nodes_path)
+
+        # Create properties from metadata
+        props_data = metadata.get("properties", {})
+        properties = MaterialProperties(
+            young_modulus=props_data.get("young_modulus", 3000.0),
+            poisson_ratio=props_data.get("poisson_ratio", 0.45),
+            proliferation_rate=props_data.get("proliferation_rate", 0.01),
+            diffusion_coefficient=props_data.get("diffusion_coefficient", 0.1),
+            carrying_capacity=props_data.get("carrying_capacity", 1.0),
+            growth_stress_coefficient=props_data.get("growth_stress_coefficient", 0.1),
+            anisotropy_ratio=props_data.get("anisotropy_ratio", 2.0),
+        )
+
+        # Create solver instance without building matrices
+        solver = object.__new__(cls)
+        solver.mesh = mesh
+        solver.properties = properties
+        solver.boundary_condition = metadata.get("boundary_condition", "fixed")
+        solver.biophysical_constraints = None  # Not serialized
+
+        # Load system matrices
+        matrices_dir = load_dir / "matrices"
+        solver._mass_matrix = sparse.load_npz(matrices_dir / "mass_matrix.npz")
+        solver._stiffness_matrix = sparse.load_npz(matrices_dir / "stiffness_matrix.npz")
+        solver._diffusion_matrix = sparse.load_npz(matrices_dir / "diffusion_matrix.npz")
+
+        # Load precomputed element data
+        precomputed_dir = load_dir / "precomputed"
+        solver._element_volumes = np.load(precomputed_dir / "element_volumes.npy")
+        with open(precomputed_dir / "shape_gradients.pkl", "rb") as f:
+            solver._shape_gradients = pickle.load(f)
+
+        # Load biophysical data if present
+        node_tissues_path = precomputed_dir / "node_tissues.npy"
+        solver._node_tissues = np.load(node_tissues_path) if node_tissues_path.exists() else None
+
+        fiber_dir_path = precomputed_dir / "node_fiber_directions.npy"
+        solver._node_fiber_directions = np.load(fiber_dir_path) if fiber_dir_path.exists() else None
+
+        # Load element properties if present
+        elem_props_path = precomputed_dir / "element_properties.json"
+        if elem_props_path.exists():
+            with open(elem_props_path) as f:
+                elem_props_data = json.load(f)
+            solver._element_properties = []
+            for ep in elem_props_data:
+                fiber_dir = np.array(ep["fiber_direction"]) if ep["fiber_direction"] else None
+                solver._element_properties.append(MaterialProperties(
+                    young_modulus=ep["young_modulus"],
+                    poisson_ratio=ep["poisson_ratio"],
+                    proliferation_rate=ep["proliferation_rate"],
+                    diffusion_coefficient=ep["diffusion_coefficient"],
+                    carrying_capacity=ep["carrying_capacity"],
+                    growth_stress_coefficient=ep["growth_stress_coefficient"],
+                    anisotropy_ratio=ep["anisotropy_ratio"],
+                    fiber_direction=fiber_dir,
+                ))
+        else:
+            solver._element_properties = None
+
+        return solver
+
+    @classmethod
+    def load_default(cls) -> "TumorGrowthSolver":
+        """
+        Load the precomputed default solver for posterior fossa simulations.
+
+        This provides fast initialization (~100ms vs ~10s) by loading
+        precomputed matrices built with default parameters:
+        - MNI152 space with posterior fossa restriction
+        - Bundled SUIT atlas regions
+        - Bundled MNI152 tissue segmentation
+        - Bundled HCP1065 DTI fiber orientations
+        - Default tumor origin at vermis [1, -61, -34] MNI
+
+        Returns:
+            TumorGrowthSolver ready for simulation.
+
+        Raises:
+            FileNotFoundError: If precomputed solver data not found.
+        """
+        from pathlib import Path
+
+        default_solver_dir = Path(__file__).parent.parent.parent / "data" / "solvers" / "default_posterior_fossa"
+
+        if not default_solver_dir.exists():
+            raise FileNotFoundError(
+                f"Precomputed default solver not found at {default_solver_dir}. "
+                "Run 'python -m pft_fem.create_default_solver' to generate it."
+            )
+
+        return cls.load(str(default_solver_dir))
