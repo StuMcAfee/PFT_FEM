@@ -370,8 +370,77 @@ class AtlasProcessor:
         elif tissue_type == "ventricle":
             # Not in standard SUIT atlas, return empty mask
             mask = np.zeros_like(labels, dtype=bool)
+        elif tissue_type == "template" or tissue_type == "anatomical":
+            # Use template image to get all tissue (includes brainstem)
+            mask = self.get_anatomical_mask()
         else:
             raise ValueError(f"Unknown tissue type: {tissue_type}")
+
+        return mask
+
+    def get_anatomical_mask(
+        self,
+        threshold: Optional[float] = None,
+        include_brainstem: bool = True,
+    ) -> NDArray[np.bool_]:
+        """
+        Create a tissue mask from the anatomical template image.
+
+        This method thresholds the T1 template image to create a mask that
+        includes all visible tissue, not just the labeled cerebellar regions.
+        This is important for including the brainstem in tumor simulations.
+
+        Args:
+            threshold: Intensity threshold for the template. If None, uses
+                      Otsu's method to automatically determine threshold.
+            include_brainstem: If True (default), includes all tissue visible
+                              in the template. If False, uses only labeled regions.
+
+        Returns:
+            Binary mask of all tissue in the template image.
+        """
+        if not include_brainstem:
+            # Fall back to label-based mask
+            return self.atlas.labels > 0
+
+        template = self.atlas.template
+
+        if threshold is None:
+            # Use Otsu's method for automatic thresholding
+            # Only consider non-zero voxels
+            nonzero_values = template[template > 0]
+            if len(nonzero_values) == 0:
+                return np.zeros_like(template, dtype=bool)
+
+            # Simple Otsu implementation
+            hist, bin_edges = np.histogram(nonzero_values, bins=256)
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+            # Compute cumulative sums and means
+            weight1 = np.cumsum(hist)
+            weight2 = np.cumsum(hist[::-1])[::-1]
+
+            mean1 = np.cumsum(hist * bin_centers) / (weight1 + 1e-10)
+            mean2 = (np.cumsum((hist * bin_centers)[::-1]) / (weight2[::-1] + 1e-10))[::-1]
+
+            # Compute between-class variance
+            variance = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
+
+            # Find optimal threshold
+            idx = np.argmax(variance)
+            threshold = bin_centers[idx]
+
+        # Create mask from thresholded template
+        mask = template > threshold
+
+        # Clean up with morphological operations
+        from scipy import ndimage
+
+        # Remove small isolated regions
+        mask = ndimage.binary_opening(mask, iterations=1)
+
+        # Fill small holes
+        mask = ndimage.binary_closing(mask, iterations=1)
 
         return mask
 
