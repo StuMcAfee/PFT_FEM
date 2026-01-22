@@ -64,10 +64,19 @@ def create_default_solver(output_dir: Path = None) -> None:
     print("\nStep 2: Creating mesh from posterior fossa region...")
     start = time.time()
 
-    # Get posterior fossa mask from biophysical constraints
-    mask = bc.compute_posterior_fossa_mask()
-    print(f"  Posterior fossa mask shape: {mask.shape}")
-    print(f"  Mask voxel count: {mask.sum()}")
+    # Get posterior fossa bounding box mask
+    pf_bounds_mask = bc.compute_posterior_fossa_mask()
+    print(f"  Posterior fossa bounds shape: {pf_bounds_mask.shape}")
+    print(f"  Posterior fossa bounds voxels: {pf_bounds_mask.sum()}")
+
+    # Get actual brain tissue from segmentation (GM + WM, excluding CSF/background)
+    tissue_labels = bc._segmentation.labels
+    brain_tissue_mask = (tissue_labels == 2) | (tissue_labels == 3)  # GM=2, WM=3
+    print(f"  Brain tissue voxels (GM+WM): {brain_tissue_mask.sum()}")
+
+    # Combine: only brain tissue within posterior fossa bounds
+    mask = pf_bounds_mask & brain_tissue_mask
+    print(f"  Combined mask voxels (posterior fossa tissue): {mask.sum()}")
 
     # Create mesh from mask
     mesh_gen = MeshGenerator()
