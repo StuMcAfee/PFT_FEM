@@ -14,7 +14,7 @@ from numpy.typing import NDArray
 
 from .atlas import AtlasData, AtlasProcessor
 from .mesh import TetMesh, MeshGenerator
-from .fem import TumorGrowthSolver, TumorState, MaterialProperties
+from .fem import TumorGrowthSolver, TumorState, MaterialProperties, SolverConfig
 from .transforms import SpatialTransform, compute_transform_from_simulation
 
 
@@ -112,10 +112,14 @@ class MRISimulator:
 
     Pipeline:
     1. Load atlas data
-    2. Generate FEM mesh
+    2. Generate FEM mesh (optionally coarse for speed)
     3. Simulate tumor growth
-    4. Deform atlas based on simulation
+    4. Deform atlas based on simulation (interpolated to full resolution)
     5. Generate MRI signal based on tissue properties
+
+    Supports multi-resolution simulation: compute on coarse mesh, output at
+    full atlas resolution. Use SolverConfig.default() or SolverConfig.fast_coarse()
+    for fast approximate solutions.
     """
 
     def __init__(
@@ -123,6 +127,7 @@ class MRISimulator:
         atlas_data: AtlasData,
         tumor_params: Optional[TumorParameters] = None,
         relaxation_params: Optional[Dict[str, TissueRelaxation]] = None,
+        solver_config: Optional[SolverConfig] = None,
     ):
         """
         Initialize the MRI simulator.
@@ -131,37 +136,84 @@ class MRISimulator:
             atlas_data: Loaded SUIT atlas data.
             tumor_params: Tumor simulation parameters.
             relaxation_params: MRI relaxation parameters per tissue.
+            solver_config: Solver configuration for performance/accuracy tradeoffs.
+                          Defaults to SolverConfig.default() which uses coarse mesh
+                          for fast simulation with high-resolution output.
         """
         self.atlas = atlas_data
         self.tumor_params = tumor_params or TumorParameters()
         self.relaxation_params = relaxation_params or DEFAULT_RELAXATION_PARAMS
+        self.solver_config = solver_config or SolverConfig.default()
 
         self.processor = AtlasProcessor(atlas_data)
         self.mesh: Optional[TetMesh] = None
         self.solver: Optional[TumorGrowthSolver] = None
 
-    def setup(self, mesh_resolution: float = 2.0) -> None:
+        # Store original atlas properties for high-resolution output
+        self._atlas_shape = atlas_data.shape
+        self._atlas_affine = atlas_data.affine
+        self._atlas_voxel_size = atlas_data.voxel_size
+
+    def setup(self, mesh_resolution: Optional[float] = None) -> None:
         """
         Set up the simulation (mesh generation, solver initialization).
 
         Args:
-            mesh_resolution: Target mesh element size in mm.
+            mesh_resolution: Target mesh voxel size in mm. If None, uses
+                           solver_config.mesh_voxel_size (default: 3mm for speed).
         """
+        # Use solver_config mesh size if not explicitly specified
+        if mesh_resolution is None:
+            mesh_resolution = self.solver_config.mesh_voxel_size
+
         # Get tissue mask
         tissue_mask = self.processor.get_tissue_mask("all")
 
-        # Generate mesh
+        # Downsample mask if using coarse mesh
+        atlas_voxel_size = np.array(self._atlas_voxel_size)
+        coarse_factor = mesh_resolution / atlas_voxel_size[0]  # Assume isotropic
+
+        if coarse_factor > 1.5:
+            # Downsample mask for coarse mesh generation
+            from scipy import ndimage
+            zoom_factors = tuple(1.0 / coarse_factor for _ in range(3))
+            tissue_mask_coarse = ndimage.zoom(
+                tissue_mask.astype(np.float32),
+                zoom_factors,
+                order=0  # Nearest neighbor for binary mask
+            ) > 0.5
+
+            # Compute coarse affine (scale the voxel-to-physical transform)
+            coarse_affine = self._atlas_affine.copy()
+            coarse_affine[:3, :3] *= coarse_factor
+
+            coarse_voxel_size = tuple(v * coarse_factor for v in self._atlas_voxel_size)
+        else:
+            tissue_mask_coarse = tissue_mask
+            coarse_affine = self._atlas_affine
+            coarse_voxel_size = self._atlas_voxel_size
+
+        # Generate mesh at specified resolution
         generator = MeshGenerator()
         self.mesh = generator.from_mask(
-            mask=tissue_mask,
-            voxel_size=self.atlas.voxel_size,
-            labels=self.atlas.labels,
-            affine=self.atlas.affine,
+            mask=tissue_mask_coarse,
+            voxel_size=coarse_voxel_size,
+            labels=None,  # Labels not needed for coarse mesh
+            affine=coarse_affine,
         )
+
+        # Store mesh resolution info for later interpolation
+        self._mesh_voxel_size = coarse_voxel_size
+        self._mesh_affine = coarse_affine
+        self._mesh_shape = tissue_mask_coarse.shape
 
         # Initialize FEM solver
         properties = self.tumor_params.to_material_properties()
-        self.solver = TumorGrowthSolver(self.mesh, properties)
+        self.solver = TumorGrowthSolver(
+            self.mesh,
+            properties,
+            solver_config=self.solver_config,
+        )
 
     def _create_initial_state(self) -> TumorState:
         """
@@ -436,41 +488,53 @@ class MRISimulator:
         image: NDArray[np.float32],
         tumor_state: TumorState,
     ) -> NDArray[np.float32]:
-        """Apply tumor-induced deformation to image."""
+        """
+        Apply tumor-induced deformation to image.
+
+        Uses multi-resolution interpolation: computes displacement from coarse
+        mesh nodes and interpolates to full atlas resolution.
+        """
         if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.1:
             return image
 
         from scipy import ndimage
 
-        # Create displacement field in volume space
-        shape = self.atlas.shape
-        disp_field = np.zeros((*shape, 3), dtype=np.float32)
+        # Output at full atlas resolution
+        output_shape = self._atlas_shape
+        output_affine = self._atlas_affine
+        output_voxel_size = self._atlas_voxel_size
 
-        # Interpolate displacement from nodes to volume
-        for i, node in enumerate(self.mesh.nodes):
-            voxel = self._physical_to_voxel(node)
+        # Get mesh resolution info
+        mesh_shape = getattr(self, '_mesh_shape', output_shape)
+        mesh_affine = getattr(self, '_mesh_affine', output_affine)
+        mesh_voxel_size = getattr(self, '_mesh_voxel_size', output_voxel_size)
 
-            if all(0 <= voxel[d] < shape[d] for d in range(3)):
-                vx, vy, vz = int(voxel[0]), int(voxel[1]), int(voxel[2])
-                disp_field[vx, vy, vz] = tumor_state.displacement[i]
+        # Compute displacement field at full resolution using multi-resolution interpolation
+        transform = compute_transform_from_simulation(
+            displacement_at_nodes=tumor_state.displacement,
+            mesh_nodes=self.mesh.nodes,
+            volume_shape=mesh_shape,
+            affine=mesh_affine,
+            voxel_size=mesh_voxel_size,
+            smoothing_sigma=2.0,
+            output_shape=output_shape,
+            output_affine=output_affine,
+            output_voxel_size=output_voxel_size,
+        )
 
-        # Smooth displacement field
-        for d in range(3):
-            disp_field[..., d] = ndimage.gaussian_filter(
-                disp_field[..., d], sigma=2.0
-            )
+        disp_field = transform.displacement_field
 
         # Apply deformation using coordinate transform
-        # Create coordinate grids
+        # Create coordinate grids at full resolution
         coords = np.array(np.meshgrid(
-            np.arange(shape[0]),
-            np.arange(shape[1]),
-            np.arange(shape[2]),
+            np.arange(output_shape[0]),
+            np.arange(output_shape[1]),
+            np.arange(output_shape[2]),
             indexing='ij'
         ), dtype=np.float32)
 
         # Add displacement (convert mm to voxels)
-        voxel_size = np.array(self.atlas.voxel_size)
+        voxel_size = np.array(output_voxel_size)
         for d in range(3):
             coords[d] -= disp_field[..., d] / voxel_size[d]
 
@@ -491,6 +555,9 @@ class MRISimulator:
         This transform encapsulates the deformation induced by tumor growth and
         can be exported in ANTsPy-compatible formats for use in other pipelines.
 
+        Uses multi-resolution interpolation: computes displacement from coarse
+        mesh nodes and outputs at full atlas resolution.
+
         Args:
             tumor_state: Final tumor state with displacement field.
 
@@ -502,21 +569,30 @@ class MRISimulator:
 
         # Skip if displacement is negligible
         if np.max(np.abs(tumor_state.displacement)) < 0.01:
-            # Return identity transform
+            # Return identity transform at full atlas resolution
             return SpatialTransform.identity(
-                shape=self.atlas.shape,
-                voxel_size=self.atlas.voxel_size,
-                affine=self.atlas.affine,
+                shape=self._atlas_shape,
+                voxel_size=self._atlas_voxel_size,
+                affine=self._atlas_affine,
             )
 
-        # Compute transform from FEM node displacements
+        # Get mesh resolution info
+        mesh_shape = getattr(self, '_mesh_shape', self._atlas_shape)
+        mesh_affine = getattr(self, '_mesh_affine', self._atlas_affine)
+        mesh_voxel_size = getattr(self, '_mesh_voxel_size', self._atlas_voxel_size)
+
+        # Compute transform from FEM node displacements with multi-resolution output
         transform = compute_transform_from_simulation(
             displacement_at_nodes=tumor_state.displacement,
             mesh_nodes=self.mesh.nodes,
-            volume_shape=self.atlas.shape,
-            affine=self.atlas.affine,
-            voxel_size=self.atlas.voxel_size,
+            volume_shape=mesh_shape,
+            affine=mesh_affine,
+            voxel_size=mesh_voxel_size,
             smoothing_sigma=2.0,
+            # Output at full atlas resolution
+            output_shape=self._atlas_shape,
+            output_affine=self._atlas_affine,
+            output_voxel_size=self._atlas_voxel_size,
         )
 
         # Add simulation metadata to transform
@@ -526,6 +602,8 @@ class MRISimulator:
             "tumor_initial_radius": self.tumor_params.initial_radius,
             "proliferation_rate": self.tumor_params.proliferation_rate,
             "diffusion_rate": self.tumor_params.diffusion_rate,
+            "mesh_voxel_size": self.solver_config.mesh_voxel_size,
+            "output_at_full_resolution": self.solver_config.output_at_full_resolution,
         }
 
         return transform
