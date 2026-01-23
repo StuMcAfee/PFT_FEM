@@ -89,6 +89,20 @@ def create_default_solver(
     mask = pf_bounds_mask & brain_tissue_mask
     print(f"  Combined mask voxels (posterior fossa tissue): {mask.sum()}")
 
+    # Get the affine from the segmentation to transform mesh to MNI physical coordinates
+    # The segmentation affine maps voxel indices to MNI physical space
+    original_affine = bc._segmentation.affine
+    if original_affine is None:
+        # Fallback: create standard MNI152 affine (center at AC)
+        # Standard MNI152 1mm: origin at corner, center voxel (91, 109, 91) = MNI (0, 0, 0)
+        original_affine = np.eye(4)
+        original_affine[0, 3] = -90  # X offset to center
+        original_affine[1, 3] = -126  # Y offset
+        original_affine[2, 3] = -72   # Z offset
+
+    print(f"  Original affine (MNI space):")
+    print(f"    Voxel [0,0,0] -> MNI {original_affine[:3, 3]}")
+
     # Downsample mask if using coarse mesh (voxel_size > 1.5mm)
     original_voxel_size = 1.0  # MNI152 is 1mm isotropic
     coarse_factor = mesh_voxel_size / original_voxel_size
@@ -102,15 +116,24 @@ def create_default_solver(
             order=0  # Nearest neighbor for binary mask
         ) > 0.5
         coarse_voxel_size = (mesh_voxel_size, mesh_voxel_size, mesh_voxel_size)
+
+        # Use the original affine without modification
+        # The mesh generator scales nodes by voxel_size first (0-180 for 3mm voxels),
+        # then the affine transforms to physical coordinates
+        # This works correctly because: physical = affine @ (voxel_index * voxel_size)
+        coarse_affine = original_affine.copy()
+
         print(f"  Coarse mask shape: {mask_coarse.shape}")
         print(f"  Coarse mask voxels: {mask_coarse.sum()}")
     else:
         mask_coarse = mask
         coarse_voxel_size = (original_voxel_size, original_voxel_size, original_voxel_size)
+        coarse_affine = original_affine
 
     # Create mesh from mask at specified resolution
+    # Pass the affine to transform mesh nodes to MNI physical coordinates
     mesh_gen = MeshGenerator()
-    mesh = mesh_gen.from_mask(mask_coarse, voxel_size=coarse_voxel_size)
+    mesh = mesh_gen.from_mask(mask_coarse, voxel_size=coarse_voxel_size, affine=coarse_affine)
 
     print(f"  Mesh nodes: {len(mesh.nodes)}")
     print(f"  Mesh elements: {len(mesh.elements)}")
