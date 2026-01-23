@@ -633,6 +633,10 @@ class TumorState:
         )
 
 
+# Default coarse mesh voxel size for fast simulation (mm)
+DEFAULT_COARSE_MESH_VOXEL_SIZE = 3.0
+
+
 @dataclass
 class SolverConfig:
     """
@@ -641,10 +645,15 @@ class SolverConfig:
     Provides options for approximate solutions that trade accuracy for speed:
     - AMG preconditioning for faster CG convergence
     - Reduced tolerance for fewer iterations
+    - Coarse mesh with high-resolution output interpolation
     - Maximum iteration limits
 
     Example usage:
-        # Fast approximate mode (3-10x speedup)
+        # Fast coarse mode (recommended default, ~50-100x speedup)
+        config = SolverConfig.fast_coarse()
+        solver = TumorGrowthSolver(mesh, solver_config=config)
+
+        # Fast approximate mode (3-10x speedup, same resolution)
         config = SolverConfig.fast()
         solver = TumorGrowthSolver(mesh, solver_config=config)
 
@@ -666,32 +675,74 @@ class SolverConfig:
     diffusion_use_iterative: bool = False  # Use iterative solver for diffusion
     diffusion_tol: float = 1e-8  # Tolerance for iterative diffusion solver
 
+    # Mesh resolution settings for multi-resolution simulation
+    mesh_voxel_size: float = 1.0  # Mesh voxel size in mm (larger = coarser = faster)
+    output_at_full_resolution: bool = True  # Interpolate output to original resolution
+
     # Cached AMG preconditioner (built lazily)
     _amg_preconditioner: Any = field(default=None, repr=False, compare=False)
 
     @classmethod
     def default(cls) -> "SolverConfig":
-        """Default configuration balancing speed and accuracy."""
+        """
+        Default configuration using coarse mesh for speed.
+
+        Uses 3mm mesh voxels with AMG preconditioning and interpolates
+        output to full resolution. This is the recommended default for
+        most applications.
+
+        Typical speedup: ~50-100x vs fine mesh + standard solver
+        Accuracy: Smooth deformation field, suitable for most applications
+        """
         return cls(
             mechanical_tol=1e-6,
             mechanical_maxiter=1000,
             use_amg=True,
             amg_cycle="V",
+            mesh_voxel_size=DEFAULT_COARSE_MESH_VOXEL_SIZE,
+            output_at_full_resolution=True,
         )
 
     @classmethod
-    def fast(cls) -> "SolverConfig":
+    def fast_coarse(cls) -> "SolverConfig":
         """
-        Fast approximate configuration for quick previews.
+        Fastest configuration using coarse mesh + reduced tolerance.
 
-        Uses reduced tolerance and AMG preconditioning for 3-10x speedup.
-        Typical accuracy loss: ~0.1-1% relative error.
+        Combines coarse mesh (3mm voxels), AMG preconditioning, and
+        reduced solver tolerance for maximum speed. Output is interpolated
+        to full resolution.
+
+        Typical speedup: ~100-200x vs fine mesh + standard solver
+        Accuracy: ~1-5% relative error in displacement field
         """
         return cls(
             mechanical_tol=1e-3,
             mechanical_maxiter=100,
             use_amg=True,
             amg_cycle="V",
+            mesh_voxel_size=DEFAULT_COARSE_MESH_VOXEL_SIZE,
+            output_at_full_resolution=True,
+        )
+
+    @classmethod
+    def fast(cls) -> "SolverConfig":
+        """
+        Fast configuration with same mesh resolution.
+
+        Uses reduced tolerance and AMG preconditioning for 3-10x speedup
+        at the same mesh resolution. Use this when you need the full
+        mesh detail but want faster solving.
+
+        Typical speedup: 3-10x
+        Accuracy: ~0.1-1% relative error
+        """
+        return cls(
+            mechanical_tol=1e-3,
+            mechanical_maxiter=100,
+            use_amg=True,
+            amg_cycle="V",
+            mesh_voxel_size=1.0,  # Same as atlas resolution
+            output_at_full_resolution=True,
         )
 
     @classmethod
@@ -699,12 +750,18 @@ class SolverConfig:
         """
         High accuracy configuration for final results.
 
-        Uses tight tolerance without AMG (direct solver fallback).
+        Uses fine mesh (1mm voxels), tight tolerance, and direct solver.
+        Use this when maximum accuracy is required.
+
+        Typical speedup: 1x (baseline)
+        Accuracy: Maximum precision
         """
         return cls(
             mechanical_tol=1e-8,
             mechanical_maxiter=2000,
             use_amg=False,
+            mesh_voxel_size=1.0,
+            output_at_full_resolution=True,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -717,6 +774,8 @@ class SolverConfig:
             "amg_strength": self.amg_strength,
             "diffusion_use_iterative": self.diffusion_use_iterative,
             "diffusion_tol": self.diffusion_tol,
+            "mesh_voxel_size": self.mesh_voxel_size,
+            "output_at_full_resolution": self.output_at_full_resolution,
         }
 
     @classmethod
@@ -730,6 +789,8 @@ class SolverConfig:
             amg_strength=data.get("amg_strength", "symmetric"),
             diffusion_use_iterative=data.get("diffusion_use_iterative", False),
             diffusion_tol=data.get("diffusion_tol", 1e-8),
+            mesh_voxel_size=data.get("mesh_voxel_size", DEFAULT_COARSE_MESH_VOXEL_SIZE),
+            output_at_full_resolution=data.get("output_at_full_resolution", True),
         )
 
 

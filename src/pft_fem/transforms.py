@@ -690,39 +690,142 @@ def compute_transform_from_simulation(
     affine: NDArray[np.float64],
     voxel_size: Tuple[float, float, float],
     smoothing_sigma: float = 2.0,
+    output_shape: Optional[Tuple[int, int, int]] = None,
+    output_affine: Optional[NDArray[np.float64]] = None,
+    output_voxel_size: Optional[Tuple[float, float, float]] = None,
 ) -> SpatialTransform:
     """
     Compute spatial transform from FEM simulation results.
 
     Interpolates displacement from mesh nodes to a regular volume grid.
+    Supports multi-resolution output: compute on coarse mesh, output at high resolution.
 
     Args:
         displacement_at_nodes: Displacement vectors at mesh nodes, shape (N, 3).
         mesh_nodes: Node coordinates in physical space, shape (N, 3).
-        volume_shape: Output volume dimensions (X, Y, Z).
-        affine: Affine matrix of the reference volume.
-        voxel_size: Voxel size in mm.
+        volume_shape: Mesh/input volume dimensions (X, Y, Z).
+        affine: Affine matrix of the mesh reference volume.
+        voxel_size: Mesh voxel size in mm.
         smoothing_sigma: Gaussian smoothing sigma in voxels.
+        output_shape: Output volume dimensions (defaults to volume_shape).
+        output_affine: Output affine matrix (defaults to affine).
+        output_voxel_size: Output voxel size (defaults to voxel_size).
 
     Returns:
-        SpatialTransform with interpolated displacement field.
+        SpatialTransform with interpolated displacement field at output resolution.
     """
     from scipy import ndimage
+    from scipy.interpolate import RBFInterpolator
 
-    # Initialize displacement field
-    disp_field = np.zeros((*volume_shape, 3), dtype=np.float32)
+    # Use input parameters as defaults for output
+    if output_shape is None:
+        output_shape = volume_shape
+    if output_affine is None:
+        output_affine = affine
+    if output_voxel_size is None:
+        output_voxel_size = voxel_size
+
+    # Check if we need multi-resolution interpolation
+    is_multi_resolution = (
+        output_shape != volume_shape or
+        not np.allclose(output_affine, affine) or
+        output_voxel_size != voxel_size
+    )
+
+    # Initialize output displacement field
+    disp_field = np.zeros((*output_shape, 3), dtype=np.float32)
 
     # Inverse affine for physical-to-voxel conversion
-    inv_affine = np.linalg.inv(affine)
+    inv_output_affine = np.linalg.inv(output_affine)
 
-    # Scatter node displacements to voxel grid
-    for i, (node, disp) in enumerate(zip(mesh_nodes, displacement_at_nodes)):
-        # Convert physical coordinate to voxel
-        voxel = (inv_affine @ np.append(node, 1.0))[:3]
-        vi = np.round(voxel).astype(int)
+    if is_multi_resolution and len(mesh_nodes) > 0:
+        # Multi-resolution: use RBF interpolation for smooth displacement field
+        # This properly interpolates from sparse coarse mesh to dense fine grid
 
-        if all(0 <= vi[d] < volume_shape[d] for d in range(3)):
-            disp_field[vi[0], vi[1], vi[2]] = disp
+        # Filter nodes with non-zero displacement for efficiency
+        disp_magnitude = np.linalg.norm(displacement_at_nodes, axis=1)
+        active_mask = disp_magnitude > 1e-10
+        active_nodes = mesh_nodes[active_mask]
+        active_disp = displacement_at_nodes[active_mask]
+
+        if len(active_nodes) > 10:
+            # Use RBF interpolation for smooth interpolation
+            # Thin-plate spline kernel gives smooth results
+            try:
+                # Subsample if too many nodes (RBF is O(N^2))
+                max_rbf_nodes = 5000
+                if len(active_nodes) > max_rbf_nodes:
+                    indices = np.random.choice(
+                        len(active_nodes), max_rbf_nodes, replace=False
+                    )
+                    active_nodes = active_nodes[indices]
+                    active_disp = active_disp[indices]
+
+                # Create RBF interpolator for each displacement component
+                rbf_interpolators = []
+                for d in range(3):
+                    rbf = RBFInterpolator(
+                        active_nodes,
+                        active_disp[:, d],
+                        kernel='thin_plate_spline',
+                        smoothing=1.0,  # Add smoothing for stability
+                    )
+                    rbf_interpolators.append(rbf)
+
+                # Generate output voxel coordinates in physical space
+                # Process in chunks to avoid memory issues
+                chunk_size = 10000
+                output_coords = []
+
+                for x in range(output_shape[0]):
+                    for y in range(output_shape[1]):
+                        for z in range(output_shape[2]):
+                            # Convert voxel to physical coordinate
+                            voxel_homogeneous = np.array([x, y, z, 1.0])
+                            physical = (output_affine @ voxel_homogeneous)[:3]
+                            output_coords.append((x, y, z, physical))
+
+                            if len(output_coords) >= chunk_size:
+                                # Interpolate this chunk
+                                coords_array = np.array([c[3] for c in output_coords])
+                                for d in range(3):
+                                    interp_values = rbf_interpolators[d](coords_array)
+                                    for i, (vx, vy, vz, _) in enumerate(output_coords):
+                                        disp_field[vx, vy, vz, d] = interp_values[i]
+                                output_coords = []
+
+                # Process remaining coordinates
+                if output_coords:
+                    coords_array = np.array([c[3] for c in output_coords])
+                    for d in range(3):
+                        interp_values = rbf_interpolators[d](coords_array)
+                        for i, (vx, vy, vz, _) in enumerate(output_coords):
+                            disp_field[vx, vy, vz, d] = interp_values[i]
+
+            except Exception:
+                # Fall back to scatter + smooth if RBF fails
+                _scatter_displacements(
+                    disp_field, mesh_nodes, displacement_at_nodes,
+                    inv_output_affine, output_shape
+                )
+                # Use larger smoothing for coarse-to-fine
+                effective_sigma = smoothing_sigma * 2
+                for d in range(3):
+                    disp_field[..., d] = ndimage.gaussian_filter(
+                        disp_field[..., d], sigma=effective_sigma
+                    )
+        else:
+            # Too few nodes, use scatter + smooth
+            _scatter_displacements(
+                disp_field, mesh_nodes, displacement_at_nodes,
+                inv_output_affine, output_shape
+            )
+    else:
+        # Same resolution: use original scatter + smooth approach
+        _scatter_displacements(
+            disp_field, mesh_nodes, displacement_at_nodes,
+            inv_output_affine, output_shape
+        )
 
     # Smooth the displacement field to fill gaps
     if smoothing_sigma > 0:
@@ -734,8 +837,25 @@ def compute_transform_from_simulation(
 
     return SpatialTransform.from_displacement_field(
         displacement=disp_field,
-        affine=affine,
-        voxel_size=voxel_size,
+        affine=output_affine,
+        voxel_size=output_voxel_size,
         source_space="SUIT",
         target_space="deformed",
     )
+
+
+def _scatter_displacements(
+    disp_field: NDArray[np.float32],
+    mesh_nodes: NDArray[np.float64],
+    displacement_at_nodes: NDArray[np.float64],
+    inv_affine: NDArray[np.float64],
+    volume_shape: Tuple[int, int, int],
+) -> None:
+    """Scatter node displacements to voxel grid using nearest-neighbor."""
+    for i, (node, disp) in enumerate(zip(mesh_nodes, displacement_at_nodes)):
+        # Convert physical coordinate to voxel
+        voxel = (inv_affine @ np.append(node, 1.0))[:3]
+        vi = np.round(voxel).astype(int)
+
+        if all(0 <= vi[d] < volume_shape[d] for d in range(3)):
+            disp_field[vi[0], vi[1], vi[2]] = disp

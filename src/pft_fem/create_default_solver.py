@@ -8,12 +8,14 @@ This script generates a precomputed solver with default parameters:
 - Bundled MNI152 tissue segmentation
 - Bundled HCP1065 DTI fiber orientations
 - Fixed boundary conditions
+- Coarse mesh (3mm voxels) for fast simulation with high-res output interpolation
 
 The precomputed solver can be loaded with TumorGrowthSolver.load_default()
 for ~100x faster initialization compared to building from scratch.
 
 Usage:
     python -m pft_fem.create_default_solver
+    python -m pft_fem.create_default_solver --mesh-voxel-size 2.0  # finer mesh
 """
 
 import sys
@@ -21,23 +23,32 @@ import time
 from pathlib import Path
 
 
-def create_default_solver(output_dir: Path = None) -> None:
+def create_default_solver(
+    output_dir: Path = None,
+    mesh_voxel_size: float = 3.0,
+) -> None:
     """
     Create and save the default precomputed solver.
 
     Args:
         output_dir: Directory to save solver. Defaults to data/solvers/default_posterior_fossa.
+        mesh_voxel_size: Mesh voxel size in mm. Default 3.0mm for fast simulation.
+                        Smaller values = more accurate but slower.
     """
     print("Creating precomputed default FEM solver...")
+    print(f"  Mesh voxel size: {mesh_voxel_size}mm")
     print("=" * 60)
 
     # Import here to show progress
     print("Loading modules...")
     start = time.time()
 
+    import numpy as np
+    from scipy import ndimage
+
     from .biophysical_constraints import BiophysicalConstraints
     from .mesh import MeshGenerator
-    from .fem import TumorGrowthSolver
+    from .fem import TumorGrowthSolver, SolverConfig
 
     print(f"  Modules loaded in {time.time() - start:.2f}s")
 
@@ -78,28 +89,61 @@ def create_default_solver(output_dir: Path = None) -> None:
     mask = pf_bounds_mask & brain_tissue_mask
     print(f"  Combined mask voxels (posterior fossa tissue): {mask.sum()}")
 
-    # Create mesh from mask
+    # Downsample mask if using coarse mesh (voxel_size > 1.5mm)
+    original_voxel_size = 1.0  # MNI152 is 1mm isotropic
+    coarse_factor = mesh_voxel_size / original_voxel_size
+
+    if coarse_factor > 1.5:
+        print(f"  Downsampling mask by factor {coarse_factor:.1f} for coarse mesh...")
+        zoom_factors = tuple(1.0 / coarse_factor for _ in range(3))
+        mask_coarse = ndimage.zoom(
+            mask.astype(np.float32),
+            zoom_factors,
+            order=0  # Nearest neighbor for binary mask
+        ) > 0.5
+        coarse_voxel_size = (mesh_voxel_size, mesh_voxel_size, mesh_voxel_size)
+        print(f"  Coarse mask shape: {mask_coarse.shape}")
+        print(f"  Coarse mask voxels: {mask_coarse.sum()}")
+    else:
+        mask_coarse = mask
+        coarse_voxel_size = (original_voxel_size, original_voxel_size, original_voxel_size)
+
+    # Create mesh from mask at specified resolution
     mesh_gen = MeshGenerator()
-    mesh = mesh_gen.from_mask(mask, voxel_size=(1.0, 1.0, 1.0))
+    mesh = mesh_gen.from_mask(mask_coarse, voxel_size=coarse_voxel_size)
 
     print(f"  Mesh nodes: {len(mesh.nodes)}")
     print(f"  Mesh elements: {len(mesh.elements)}")
     print(f"  Boundary nodes: {len(mesh.boundary_nodes)}")
     print(f"  Mesh created in {time.time() - start:.2f}s")
 
-    # Step 3: Build FEM solver with biophysical constraints
+    # Step 3: Build FEM solver with biophysical constraints and default config
     print("\nStep 3: Building FEM solver with tissue-specific properties...")
     start = time.time()
+
+    # Use default solver config with coarse mesh settings
+    solver_config = SolverConfig.default()
+    solver_config = SolverConfig(
+        mechanical_tol=solver_config.mechanical_tol,
+        mechanical_maxiter=solver_config.mechanical_maxiter,
+        use_amg=solver_config.use_amg,
+        amg_cycle=solver_config.amg_cycle,
+        amg_strength=solver_config.amg_strength,
+        mesh_voxel_size=mesh_voxel_size,
+        output_at_full_resolution=True,
+    )
 
     solver = TumorGrowthSolver(
         mesh=mesh,
         boundary_condition="fixed",
         biophysical_constraints=bc,
+        solver_config=solver_config,
     )
 
     print(f"  Mass matrix: {solver._mass_matrix.shape}, nnz={solver._mass_matrix.nnz}")
     print(f"  Stiffness matrix: {solver._stiffness_matrix.shape}, nnz={solver._stiffness_matrix.nnz}")
     print(f"  Diffusion matrix: {solver._diffusion_matrix.shape}, nnz={solver._diffusion_matrix.nnz}")
+    print(f"  Solver config: mesh_voxel_size={mesh_voxel_size}mm, use_amg={solver_config.use_amg}")
     print(f"  Solver built in {time.time() - start:.2f}s")
 
     # Step 4: Save precomputed solver
@@ -192,11 +236,20 @@ def main():
         default=None,
         help="Output directory (default: data/solvers/default_posterior_fossa)",
     )
+    parser.add_argument(
+        "--mesh-voxel-size",
+        type=float,
+        default=3.0,
+        help="Mesh voxel size in mm (default: 3.0 for fast coarse simulation)",
+    )
 
     args = parser.parse_args()
 
     try:
-        create_default_solver(args.output_dir)
+        create_default_solver(
+            output_dir=args.output_dir,
+            mesh_voxel_size=args.mesh_voxel_size,
+        )
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         import traceback
