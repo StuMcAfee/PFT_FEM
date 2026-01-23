@@ -1,0 +1,27 @@
+{
+  "version": "1.1",
+  "boundary_condition": "fixed",
+  "num_nodes": 19210,
+  "num_elements": 79940,
+  "has_biophysical_constraints": true,
+  "properties": {
+    "young_modulus": 3000.0,
+    "poisson_ratio": 0.45,
+    "proliferation_rate": 0.01,
+    "diffusion_coefficient": 0.1,
+    "carrying_capacity": 1.0,
+    "growth_stress_coefficient": 0.1,
+    "anisotropy_ratio": 2.0
+  },
+  "solver_config": {
+    "mechanical_tol": 1e-06,
+    "mechanical_maxiter": 1000,
+    "use_amg": true,
+    "amg_cycle": "V",
+    "amg_strength": "symmetric",
+    "diffusion_use_iterative": false,
+    "diffusion_tol": 1e-08,
+    "mesh_voxel_size": 3.0,
+    "output_at_full_resolution": true
+  }
+}
