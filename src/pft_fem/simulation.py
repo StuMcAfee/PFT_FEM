@@ -359,31 +359,186 @@ class MRISimulator:
         TE: float,
         TI: float,
     ) -> NDArray[np.float32]:
-        """Generate image for a single MRI sequence."""
+        """
+        Generate image for a single MRI sequence.
+
+        Uses the SUIT template as the base intensity and modulates it by
+        tissue-specific MRI signal equations. The template is deformed first
+        to show tissue displacement from tumor mass effect.
+        """
         shape = self.atlas.shape
-        image = np.zeros(shape, dtype=np.float32)
 
-        # Get tissue segmentation with tumor
-        tissue_map = self._create_tissue_map(tumor_state)
+        # Step 1: Apply deformation to the template to show tissue displacement
+        deformed_template = self._apply_deformation(
+            self.atlas.template.astype(np.float32),
+            tumor_state
+        )
 
-        # Compute signal intensity for each tissue
+        # Step 2: Apply deformation to labels for tissue segmentation
+        from scipy import ndimage
+        deformed_labels = self._apply_deformation_labels(
+            self.atlas.labels,
+            tumor_state
+        )
+
+        # Step 3: Create tissue map from deformed labels
+        tissue_map = self._create_tissue_map_from_labels(
+            deformed_labels, tumor_state
+        )
+
+        # Step 4: Compute tissue-specific signal modulation
+        # Build modulation map based on tissue type
+        modulation = np.ones(shape, dtype=np.float32)
         for tissue_name, mask in tissue_map.items():
             if tissue_name not in self.relaxation_params:
                 continue
 
             params = self.relaxation_params[tissue_name]
-            signal = self._compute_signal(params, sequence, TR, TE, TI)
-            image[mask] = signal
+            signal_factor = self._compute_signal(params, sequence, TR, TE, TI)
+            # Normalize by a reference signal (gray matter)
+            ref_params = self.relaxation_params["gray_matter"]
+            ref_signal = self._compute_signal(ref_params, sequence, TR, TE, TI)
+            if ref_signal > 0:
+                modulation[mask] = signal_factor / ref_signal
 
-        # Add noise
+        # Step 5: Generate MRI by modulating the deformed template
+        # Normalize template to 0-1 range for modulation
+        template_min = np.min(deformed_template[deformed_template > 0])
+        template_max = np.max(deformed_template)
+        if template_max > template_min:
+            normalized_template = (deformed_template - template_min) / (template_max - template_min)
+            normalized_template = np.clip(normalized_template, 0, 1)
+        else:
+            normalized_template = deformed_template / (template_max + 1e-6)
+
+        # Apply modulation to template
+        image = normalized_template * modulation
+
+        # Scale to typical MRI intensity range
+        image = image * 1000
+
+        # Add Rician noise (more realistic for magnitude MRI)
         noise_level = 0.02 * np.max(image)
-        noise = np.random.normal(0, noise_level, shape).astype(np.float32)
-        image = np.maximum(image + noise, 0)
+        noise_real = np.random.normal(0, noise_level, shape).astype(np.float32)
+        noise_imag = np.random.normal(0, noise_level, shape).astype(np.float32)
+        image = np.sqrt((image + noise_real)**2 + noise_imag**2)
 
-        # Apply deformation from tumor mass effect
-        image = self._apply_deformation(image, tumor_state)
+        return image.astype(np.float32)
 
-        return image
+    def _apply_deformation_labels(
+        self,
+        labels: NDArray[np.int32],
+        tumor_state: TumorState,
+    ) -> NDArray[np.int32]:
+        """
+        Apply tumor-induced deformation to label volume.
+
+        Uses nearest-neighbor interpolation to preserve label values.
+        """
+        if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.1:
+            return labels
+
+        from scipy import ndimage
+
+        # Output at full atlas resolution
+        output_shape = self._atlas_shape
+        output_affine = self._atlas_affine
+        output_voxel_size = self._atlas_voxel_size
+
+        # Get mesh resolution info
+        mesh_shape = getattr(self, '_mesh_shape', output_shape)
+        mesh_affine = getattr(self, '_mesh_affine', output_affine)
+        mesh_voxel_size = getattr(self, '_mesh_voxel_size', output_voxel_size)
+
+        # Compute displacement field
+        transform = compute_transform_from_simulation(
+            displacement_at_nodes=tumor_state.displacement,
+            mesh_nodes=self.mesh.nodes,
+            volume_shape=mesh_shape,
+            affine=mesh_affine,
+            voxel_size=mesh_voxel_size,
+            smoothing_sigma=2.0,
+            output_shape=output_shape,
+            output_affine=output_affine,
+            output_voxel_size=output_voxel_size,
+        )
+
+        disp_field = transform.displacement_field
+
+        # Create coordinate grids
+        coords = np.array(np.meshgrid(
+            np.arange(output_shape[0]),
+            np.arange(output_shape[1]),
+            np.arange(output_shape[2]),
+            indexing='ij'
+        ), dtype=np.float32)
+
+        # Add displacement (convert mm to voxels)
+        voxel_size = np.array(output_voxel_size)
+        for d in range(3):
+            coords[d] -= disp_field[..., d] / voxel_size[d]
+
+        # Use nearest-neighbor interpolation for labels
+        deformed = ndimage.map_coordinates(
+            labels.astype(np.float32), coords, order=0, mode='constant', cval=0
+        )
+
+        return deformed.astype(np.int32)
+
+    def _create_tissue_map_from_labels(
+        self,
+        labels: NDArray[np.int32],
+        tumor_state: TumorState,
+    ) -> Dict[str, NDArray[np.bool_]]:
+        """Create tissue segmentation from (possibly deformed) labels."""
+        tissue_map = {}
+
+        # Gray matter (cerebellar cortex)
+        tissue_map["gray_matter"] = (labels >= 1) & (labels <= 28)
+
+        # CSF (fourth ventricle)
+        tissue_map["csf"] = labels == 30
+
+        # White matter (approximate as brainstem)
+        tissue_map["white_matter"] = labels == 29
+
+        # Map tumor density to voxels
+        tumor_density = self._interpolate_to_volume(
+            tumor_state.cell_density
+        )
+
+        # Apply same deformation to tumor density
+        if self.mesh is not None and np.max(np.abs(tumor_state.displacement)) >= 0.1:
+            tumor_density = self._apply_deformation(tumor_density, tumor_state)
+
+        # Define tumor regions based on density
+        tumor_core = tumor_density > 0.5
+        tumor_rim = (tumor_density > 0.1) & (tumor_density <= 0.5)
+
+        # Necrotic core (very high density region)
+        necrotic = tumor_density > self.tumor_params.necrotic_threshold
+
+        # Edema (around tumor)
+        from scipy import ndimage
+        dilated = ndimage.binary_dilation(
+            tumor_density > 0.1,
+            iterations=int(self.tumor_params.edema_extent / 2)
+        )
+        edema = dilated & (tumor_density < 0.1) & (labels > 0)
+
+        # Override base tissues with tumor/edema
+        tissue_map["tumor"] = tumor_core & ~necrotic
+        tissue_map["necrosis"] = necrotic
+        tissue_map["edema"] = edema
+
+        if self.tumor_params.enhancement_ring:
+            tissue_map["enhancement"] = tumor_rim
+
+        # Remove tumor regions from normal tissue
+        for tissue in ["gray_matter", "white_matter"]:
+            tissue_map[tissue] = tissue_map[tissue] & ~tumor_core & ~edema
+
+        return tissue_map
 
     def _create_tissue_map(
         self,
@@ -585,6 +740,223 @@ class MRISimulator:
         )
 
         return deformed.astype(np.float32)
+
+    def _apply_deformation_antspy(
+        self,
+        image: NDArray[np.float32],
+        tumor_state: TumorState,
+        interpolation: str = "linear",
+    ) -> NDArray[np.float32]:
+        """
+        Apply tumor-induced deformation to image using ANTsPy.
+
+        Uses ANTsPy's apply_transforms for proper image warping with
+        a displacement field stored as a NIfTI vector image. This provides
+        more accurate interpolation than scipy's map_coordinates for
+        large deformations.
+
+        Args:
+            image: Input image to deform.
+            tumor_state: Current tumor state with displacement field.
+            interpolation: Interpolation method ("linear", "nearestNeighbor",
+                          "bSpline", "genericLabel").
+
+        Returns:
+            Deformed image.
+
+        Raises:
+            ImportError: If ANTsPy is not installed.
+        """
+        try:
+            import ants
+        except ImportError:
+            raise ImportError(
+                "ANTsPy is required for _apply_deformation_antspy. "
+                "Install with: pip install antspyx"
+            )
+
+        if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.1:
+            return image
+
+        # Output at full atlas resolution
+        output_shape = self._atlas_shape
+        output_affine = self._atlas_affine
+        output_voxel_size = self._atlas_voxel_size
+
+        # Get mesh resolution info
+        mesh_shape = getattr(self, '_mesh_shape', output_shape)
+        mesh_affine = getattr(self, '_mesh_affine', output_affine)
+        mesh_voxel_size = getattr(self, '_mesh_voxel_size', output_voxel_size)
+
+        # Compute displacement field from FEM nodes
+        transform = compute_transform_from_simulation(
+            displacement_at_nodes=tumor_state.displacement,
+            mesh_nodes=self.mesh.nodes,
+            volume_shape=mesh_shape,
+            affine=mesh_affine,
+            voxel_size=mesh_voxel_size,
+            smoothing_sigma=2.0,
+            output_shape=output_shape,
+            output_affine=output_affine,
+            output_voxel_size=output_voxel_size,
+        )
+
+        disp_field = transform.displacement_field
+
+        # Convert displacement field to ANTsPy format
+        # ANTsPy expects (X, Y, Z, 1, 3) with vector components as last dimension
+        # and values in physical coordinates (mm)
+        disp_ants_data = disp_field[:, :, :, np.newaxis, :].astype(np.float32)
+
+        # Create ANTsPy image for displacement field
+        # ANTsPy uses ITK convention: displacement is from fixed to moving
+        # Our displacement is from original to deformed, so we need to negate
+        # for pullback (sampling deformed positions in original image)
+        disp_ants_data = -disp_ants_data
+
+        # Create ANTs displacement field image
+        # Set up header with correct dimensions and directions
+        import nibabel as nib
+        import tempfile
+        import os
+
+        # Create temporary files for ANTsPy I/O
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Save displacement field as NIfTI
+            disp_nifti = nib.Nifti1Image(disp_ants_data, output_affine)
+            disp_nifti.header.set_intent("vector", name="displacement")
+            disp_nifti.header.set_data_dtype(np.float32)
+            disp_path = os.path.join(tmpdir, "disp.nii.gz")
+            nib.save(disp_nifti, disp_path)
+
+            # Save input image as NIfTI
+            img_nifti = nib.Nifti1Image(image, output_affine)
+            img_path = os.path.join(tmpdir, "input.nii.gz")
+            nib.save(img_nifti, img_path)
+
+            # Load with ANTsPy
+            ants_image = ants.image_read(img_path)
+            ants_warp = ants.image_read(disp_path)
+
+            # Apply transformation
+            # The displacement field is applied as a deformation field
+            warped = ants.apply_transforms(
+                fixed=ants_image,
+                moving=ants_image,
+                transformlist=[disp_path],
+                interpolator=interpolation,
+                whichtoinvert=[False],
+            )
+
+            # Convert back to numpy array
+            result = warped.numpy()
+
+        return result.astype(np.float32)
+
+    def generate_mri_with_antspy_warping(
+        self,
+        tumor_state: TumorState,
+        sequences: Optional[List[MRISequence]] = None,
+        TR: float = 500.0,
+        TE: float = 15.0,
+        TI: float = 1200.0,
+    ) -> Dict[str, NDArray[np.float32]]:
+        """
+        Generate synthetic MRI images using ANTsPy for deformation.
+
+        This method uses ANTsPy's apply_transforms for more accurate
+        image warping, particularly for large deformations.
+
+        Args:
+            tumor_state: Current tumor state from simulation.
+            sequences: List of MRI sequences to generate.
+            TR: Repetition time in ms.
+            TE: Echo time in ms.
+            TI: Inversion time in ms (for FLAIR).
+
+        Returns:
+            Dictionary mapping sequence name to image volume.
+
+        Raises:
+            ImportError: If ANTsPy is not installed.
+        """
+        if sequences is None:
+            sequences = [MRISequence.T1, MRISequence.T2, MRISequence.FLAIR]
+
+        images = {}
+
+        for seq in sequences:
+            images[seq.value] = self._generate_sequence_antspy(
+                tumor_state, seq, TR, TE, TI
+            )
+
+        return images
+
+    def _generate_sequence_antspy(
+        self,
+        tumor_state: TumorState,
+        sequence: MRISequence,
+        TR: float,
+        TE: float,
+        TI: float,
+    ) -> NDArray[np.float32]:
+        """
+        Generate image for a single MRI sequence using ANTsPy warping.
+
+        Similar to _generate_sequence but uses ANTsPy for deformation.
+        """
+        shape = self.atlas.shape
+
+        # Step 1: Apply deformation to the template using ANTsPy
+        deformed_template = self._apply_deformation_antspy(
+            self.atlas.template.astype(np.float32),
+            tumor_state,
+            interpolation="linear"
+        )
+
+        # Step 2: Apply deformation to labels using nearest-neighbor
+        deformed_labels = self._apply_deformation_antspy(
+            self.atlas.labels.astype(np.float32),
+            tumor_state,
+            interpolation="nearestNeighbor"
+        ).astype(np.int32)
+
+        # Step 3: Create tissue map from deformed labels
+        tissue_map = self._create_tissue_map_from_labels(
+            deformed_labels, tumor_state
+        )
+
+        # Step 4: Compute tissue-specific signal modulation
+        modulation = np.ones(shape, dtype=np.float32)
+        for tissue_name, mask in tissue_map.items():
+            if tissue_name not in self.relaxation_params:
+                continue
+
+            params = self.relaxation_params[tissue_name]
+            signal_factor = self._compute_signal(params, sequence, TR, TE, TI)
+            ref_params = self.relaxation_params["gray_matter"]
+            ref_signal = self._compute_signal(ref_params, sequence, TR, TE, TI)
+            if ref_signal > 0:
+                modulation[mask] = signal_factor / ref_signal
+
+        # Step 5: Generate MRI by modulating the deformed template
+        template_min = np.min(deformed_template[deformed_template > 0])
+        template_max = np.max(deformed_template)
+        if template_max > template_min:
+            normalized_template = (deformed_template - template_min) / (template_max - template_min)
+            normalized_template = np.clip(normalized_template, 0, 1)
+        else:
+            normalized_template = deformed_template / (template_max + 1e-6)
+
+        image = normalized_template * modulation * 1000
+
+        # Add Rician noise
+        noise_level = 0.02 * np.max(image)
+        noise_real = np.random.normal(0, noise_level, shape).astype(np.float32)
+        noise_imag = np.random.normal(0, noise_level, shape).astype(np.float32)
+        image = np.sqrt((image + noise_real)**2 + noise_imag**2)
+
+        return image.astype(np.float32)
 
     def _compute_spatial_transform(
         self,
