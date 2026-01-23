@@ -197,9 +197,10 @@ class MRISimulator:
                 order=0  # Nearest neighbor for binary mask
             ) > 0.5
 
-            # Compute coarse affine (scale the voxel-to-physical transform)
+            # Use the original affine without modification
+            # The mesh generator scales nodes by voxel_size first, then applies affine
+            # This correctly maps coarse voxel corners to physical coordinates
             coarse_affine = self._atlas_affine.copy()
-            coarse_affine[:3, :3] *= coarse_factor
 
             coarse_voxel_size = tuple(v * coarse_factor for v in self._atlas_voxel_size)
         else:
@@ -237,8 +238,31 @@ class MRISimulator:
             True if default solver was loaded successfully, False otherwise.
         """
         try:
-            self.solver = TumorGrowthSolver.load_default(self.solver_config)
-            self.mesh = self.solver.mesh
+            solver = TumorGrowthSolver.load_default(self.solver_config)
+            mesh = solver.mesh
+
+            # Check if mesh coordinates overlap with actual atlas tissue
+            # The default solver is in MNI152 space; check tissue overlap with atlas
+            inv_affine = np.linalg.inv(self._atlas_affine)
+            nodes_on_tissue = 0
+            sample_size = min(1000, len(mesh.nodes))  # Sample for efficiency
+
+            for i in range(sample_size):
+                node = mesh.nodes[i * len(mesh.nodes) // sample_size]
+                node_h = np.append(node, 1.0)
+                voxel = (inv_affine @ node_h)[:3].astype(int)
+                if all(0 <= voxel[d] < self._atlas_shape[d] for d in range(3)):
+                    if self.atlas.labels[voxel[0], voxel[1], voxel[2]] > 0:
+                        nodes_on_tissue += 1
+
+            # Require at least 30% of sampled mesh nodes to land on tissue
+            tissue_coverage = nodes_on_tissue / sample_size
+            if tissue_coverage < 0.3:
+                # Insufficient tissue overlap - mesh and atlas have incompatible geometry
+                return False
+
+            self.solver = solver
+            self.mesh = mesh
 
             # Set mesh resolution info from the loaded solver
             # The default solver uses 3mm voxel size
@@ -616,6 +640,8 @@ class MRISimulator:
         if self.mesh is None:
             return volume
 
+        from scipy import ndimage
+
         # Simple nearest-neighbor interpolation
         # For better results, use proper FEM interpolation
         for i, node in enumerate(self.mesh.nodes):
@@ -627,9 +653,14 @@ class MRISimulator:
                 vx, vy, vz = int(voxel[0]), int(voxel[1]), int(voxel[2])
                 volume[vx, vy, vz] = max(volume[vx, vy, vz], node_values[i])
 
-        # Smooth to fill gaps
-        from scipy import ndimage
-        volume = ndimage.gaussian_filter(volume, sigma=1.0)
+        # Use morphological dilation to fill gaps while preserving peak values
+        # This is better than Gaussian smoothing for thresholding applications
+        # Dilate with a small structuring element to fill 1-voxel gaps
+        struct = ndimage.generate_binary_structure(3, 1)
+        volume_dilated = ndimage.grey_dilation(volume, footprint=struct)
+
+        # Apply light smoothing only to reduce blockiness, not to spread values
+        volume = ndimage.gaussian_filter(volume_dilated, sigma=0.5)
 
         return volume
 
