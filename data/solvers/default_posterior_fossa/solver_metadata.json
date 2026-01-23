@@ -10,7 +10,7 @@
     "proliferation_rate": 0.01,
     "diffusion_coefficient": 0.1,
     "carrying_capacity": 1.0,
-    "growth_stress_coefficient": 0.1,
+    "growth_stress_coefficient": 0.15,
     "anisotropy_ratio": 2.0
   },
   "solver_config": {

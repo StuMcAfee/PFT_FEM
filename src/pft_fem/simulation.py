@@ -633,7 +633,13 @@ class MRISimulator:
         self,
         node_values: NDArray[np.float64],
     ) -> NDArray[np.float32]:
-        """Interpolate node values to volume grid."""
+        """
+        Interpolate node values to volume grid using FEM shape functions.
+
+        Uses proper tetrahedral interpolation to create a continuous field
+        rather than discrete point samples. Each voxel's value is computed
+        by finding which element contains it and using barycentric interpolation.
+        """
         shape = self.atlas.shape
         volume = np.zeros(shape, dtype=np.float32)
 
@@ -642,25 +648,75 @@ class MRISimulator:
 
         from scipy import ndimage
 
-        # Simple nearest-neighbor interpolation
-        # For better results, use proper FEM interpolation
-        for i, node in enumerate(self.mesh.nodes):
-            # Convert physical coords to voxel coords
-            voxel = self._physical_to_voxel(node)
+        # Precompute inverse affine for coordinate transform
+        inv_affine = np.linalg.inv(self.atlas.affine)
 
-            # Check bounds
-            if all(0 <= voxel[d] < shape[d] for d in range(3)):
-                vx, vy, vz = int(voxel[0]), int(voxel[1]), int(voxel[2])
-                volume[vx, vy, vz] = max(volume[vx, vy, vz], node_values[i])
+        # Get elements with significant values (optimization)
+        elem_max_values = np.array([
+            np.max(node_values[self.mesh.elements[e]])
+            for e in range(self.mesh.num_elements)
+        ])
+        active_elements = np.where(elem_max_values > 1e-6)[0]
 
-        # Use morphological dilation to fill gaps while preserving peak values
-        # This is better than Gaussian smoothing for thresholding applications
-        # Dilate with a small structuring element to fill 1-voxel gaps
-        struct = ndimage.generate_binary_structure(3, 1)
-        volume_dilated = ndimage.grey_dilation(volume, footprint=struct)
+        # Process each active element
+        for e in active_elements:
+            elem_nodes = self.mesh.elements[e]
+            elem_coords = self.mesh.nodes[elem_nodes]  # (4, 3) physical coords
+            elem_values = node_values[elem_nodes]  # (4,) values
 
-        # Apply light smoothing only to reduce blockiness, not to spread values
-        volume = ndimage.gaussian_filter(volume_dilated, sigma=0.5)
+            # Convert element nodes to voxel coordinates
+            elem_voxels = np.zeros((4, 3))
+            for i in range(4):
+                homogeneous = np.append(elem_coords[i], 1.0)
+                elem_voxels[i] = (inv_affine @ homogeneous)[:3]
+
+            # Get bounding box in voxel space (with 1-voxel padding)
+            vmin = np.floor(elem_voxels.min(axis=0) - 1).astype(int)
+            vmax = np.ceil(elem_voxels.max(axis=0) + 1).astype(int)
+
+            # Clip to volume bounds
+            vmin = np.maximum(vmin, 0)
+            vmax = np.minimum(vmax, np.array(shape))
+
+            # Precompute barycentric transform matrix for this tetrahedron
+            # Using physical coordinates for accuracy
+            T = np.column_stack([
+                elem_coords[0] - elem_coords[3],
+                elem_coords[1] - elem_coords[3],
+                elem_coords[2] - elem_coords[3],
+            ])
+
+            # Check if tetrahedron is degenerate
+            det = np.linalg.det(T)
+            if abs(det) < 1e-12:
+                continue
+
+            T_inv = np.linalg.inv(T)
+
+            # Sample all voxels in bounding box
+            for vx in range(vmin[0], vmax[0]):
+                for vy in range(vmin[1], vmax[1]):
+                    for vz in range(vmin[2], vmax[2]):
+                        # Convert voxel center to physical coordinates
+                        voxel_center = np.array([vx + 0.5, vy + 0.5, vz + 0.5, 1.0])
+                        phys_coord = (self.atlas.affine @ voxel_center)[:3]
+
+                        # Compute barycentric coordinates
+                        delta = phys_coord - elem_coords[3]
+                        bary = T_inv @ delta
+                        bary4 = np.array([bary[0], bary[1], bary[2], 1 - bary.sum()])
+
+                        # Check if point is inside tetrahedron (all bary coords in [0,1])
+                        if np.all(bary4 >= -0.01) and np.all(bary4 <= 1.01):
+                            # Interpolate value using shape functions
+                            interp_value = np.dot(bary4, elem_values)
+
+                            # Use maximum value for overlapping elements
+                            if interp_value > volume[vx, vy, vz]:
+                                volume[vx, vy, vz] = interp_value
+
+        # Light smoothing to reduce any remaining blockiness
+        volume = ndimage.gaussian_filter(volume, sigma=0.3)
 
         return volume
 
