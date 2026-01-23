@@ -1572,7 +1572,7 @@ class TumorGrowthSolver:
             states.append(current_state)
 
             if callback is not None:
-                callback(current_state)
+                callback(current_state, step_idx)
 
         return states
 
