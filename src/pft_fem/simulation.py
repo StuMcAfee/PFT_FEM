@@ -120,6 +120,9 @@ class MRISimulator:
     Supports multi-resolution simulation: compute on coarse mesh, output at
     full atlas resolution. Use SolverConfig.default() or SolverConfig.fast_coarse()
     for fast approximate solutions.
+
+    When use_default_solver=True (the default), automatically loads the precomputed
+    default solver for ~100x faster initialization.
     """
 
     def __init__(
@@ -128,6 +131,7 @@ class MRISimulator:
         tumor_params: Optional[TumorParameters] = None,
         relaxation_params: Optional[Dict[str, TissueRelaxation]] = None,
         solver_config: Optional[SolverConfig] = None,
+        use_default_solver: bool = True,
     ):
         """
         Initialize the MRI simulator.
@@ -139,11 +143,16 @@ class MRISimulator:
             solver_config: Solver configuration for performance/accuracy tradeoffs.
                           Defaults to SolverConfig.default() which uses coarse mesh
                           for fast simulation with high-resolution output.
+            use_default_solver: If True (default), automatically load the precomputed
+                               default solver when using default SolverConfig. This
+                               provides ~100x faster initialization by skipping matrix
+                               assembly. Set to False to always build solver from scratch.
         """
         self.atlas = atlas_data
         self.tumor_params = tumor_params or TumorParameters()
         self.relaxation_params = relaxation_params or DEFAULT_RELAXATION_PARAMS
         self.solver_config = solver_config or SolverConfig.default()
+        self.use_default_solver = use_default_solver
 
         self.processor = AtlasProcessor(atlas_data)
         self.mesh: Optional[TetMesh] = None
@@ -162,6 +171,11 @@ class MRISimulator:
             mesh_resolution: Target mesh voxel size in mm. If None, uses
                            solver_config.mesh_voxel_size (default: 3mm for speed).
         """
+        # Try to load precomputed default solver if enabled
+        if self.use_default_solver and mesh_resolution is None:
+            if self._try_load_default_solver():
+                return
+
         # Use solver_config mesh size if not explicitly specified
         if mesh_resolution is None:
             mesh_resolution = self.solver_config.mesh_voxel_size
@@ -214,6 +228,33 @@ class MRISimulator:
             properties,
             solver_config=self.solver_config,
         )
+
+    def _try_load_default_solver(self) -> bool:
+        """
+        Attempt to load the precomputed default solver.
+
+        Returns:
+            True if default solver was loaded successfully, False otherwise.
+        """
+        try:
+            self.solver = TumorGrowthSolver.load_default(self.solver_config)
+            self.mesh = self.solver.mesh
+
+            # Set mesh resolution info from the loaded solver
+            # The default solver uses 3mm voxel size
+            self._mesh_voxel_size = (3.0, 3.0, 3.0)
+            self._mesh_affine = self._atlas_affine.copy()
+            self._mesh_affine[:3, :3] *= 3.0
+            # Approximate mesh shape from node count
+            self._mesh_shape = self._atlas_shape
+
+            return True
+        except FileNotFoundError:
+            # Default solver not available, fall back to building from scratch
+            return False
+        except Exception:
+            # Any other error, fall back to building from scratch
+            return False
 
     def _create_initial_state(self) -> TumorState:
         """

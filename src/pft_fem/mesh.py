@@ -122,6 +122,10 @@ class TetMesh:
             "min_aspect_ratio": float(np.min(aspect_ratios)),
             "max_aspect_ratio": float(np.max(aspect_ratios)),
             "mean_aspect_ratio": float(np.mean(aspect_ratios)),
+            # Aliases for backward compatibility (quality = 1/aspect_ratio, normalized)
+            "min_quality": float(1.0 / np.max(aspect_ratios)),
+            "max_quality": float(1.0 / np.min(aspect_ratios)),
+            "mean_quality": float(1.0 / np.mean(aspect_ratios)),
         }
 
     def find_nearest_node(self, point: NDArray[np.float64]) -> int:
