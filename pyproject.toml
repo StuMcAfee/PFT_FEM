@@ -31,6 +31,7 @@ dependencies = [
     "meshio>=5.0.0",
     "scikit-image>=0.19.0",
     "matplotlib>=3.5.0",
+    "pyamg>=5.0.0",
 ]
 
 [project.optional-dependencies]
