@@ -329,8 +329,10 @@ class MaterialProperties:
     diffusion_coefficient: float = 0.1  # mm^2/day
     carrying_capacity: float = 1.0  # Normalized max cell density
 
-    # Mechanical coupling
-    growth_stress_coefficient: float = 0.1  # Stress per unit tumor density
+    # Mechanical coupling (eigenstrain formulation)
+    # This represents volumetric strain per unit cell density.
+    # Value of 0.15 means 15% volumetric expansion at full tumor density.
+    growth_stress_coefficient: float = 0.15  # Volumetric strain per unit density
 
     # Anisotropy parameters for white matter
     anisotropy_ratio: float = 2.0  # Ratio of parallel/perpendicular stiffness
@@ -396,7 +398,7 @@ class MaterialProperties:
             proliferation_rate=0.01,
             diffusion_coefficient=0.1,
             carrying_capacity=1.0,
-            growth_stress_coefficient=0.1,
+            growth_stress_coefficient=0.15,  # 15% volumetric strain at full density
             anisotropy_ratio=1.0,  # Isotropic
             fiber_direction=None,
         )
@@ -418,7 +420,7 @@ class MaterialProperties:
             proliferation_rate=0.01,
             diffusion_coefficient=0.2,  # Faster along fibers
             carrying_capacity=1.0,
-            growth_stress_coefficient=0.1,
+            growth_stress_coefficient=0.15,  # 15% volumetric strain at full density
             anisotropy_ratio=2.0,  # 2x stiffer along fibers
             fiber_direction=fiber_direction,
         )
@@ -1414,10 +1416,35 @@ class TumorGrowthSolver:
         self,
         density: NDArray[np.float64],
     ) -> NDArray[np.float64]:
-        """Compute force vector due to tumor growth (mass effect)."""
+        """
+        Compute force vector due to tumor growth (mass effect).
+
+        Uses the eigenstrain (thermal expansion) formulation:
+        - Growth causes isotropic volumetric expansion: ε_growth = α * c * [1,1,1,0,0,0]^T
+        - This creates stress via constitutive law: σ_growth = C * ε_growth
+        - Equivalent nodal forces: f = ∫ B^T * σ_growth dV
+
+        The growth_stress_coefficient α represents the volumetric strain per unit
+        cell density. A value of 0.1 means 10% volumetric expansion at full density.
+        """
         n = self.mesh.num_nodes
         alpha = self.properties.growth_stress_coefficient
         force = np.zeros(3 * n)
+
+        # Get base constitutive matrix (will be modified per-element if needed)
+        lam, mu = self.properties.lame_parameters()
+        C_base = np.array([
+            [lam + 2*mu, lam, lam, 0, 0, 0],
+            [lam, lam + 2*mu, lam, 0, 0, 0],
+            [lam, lam, lam + 2*mu, 0, 0, 0],
+            [0, 0, 0, mu, 0, 0],
+            [0, 0, 0, 0, mu, 0],
+            [0, 0, 0, 0, 0, mu],
+        ])
+
+        # Isotropic growth strain direction: [1, 1, 1, 0, 0, 0]
+        # This represents uniform volumetric expansion
+        growth_strain_dir = np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
 
         for e, elem in enumerate(self.mesh.elements):
             vol = self._element_volumes[e]
@@ -1426,12 +1453,34 @@ class TumorGrowthSolver:
             # Average density in element
             elem_density = np.mean(density[elem])
 
-            # Growth force proportional to density gradient
+            # Skip elements with negligible tumor density
+            if elem_density < 1e-6:
+                continue
+
+            # Get element-specific constitutive matrix if available
+            if self._element_properties is not None:
+                C = self._element_properties[e].get_constitutive_matrix()
+            else:
+                C = C_base
+
+            # Growth strain magnitude: ε_growth = α * c
+            # Full growth strain vector: [α*c, α*c, α*c, 0, 0, 0]
+            growth_strain = alpha * elem_density * growth_strain_dir
+
+            # Growth stress: σ_growth = C * ε_growth
+            growth_stress = C @ growth_strain
+
+            # Compute equivalent nodal forces: f_i = V * B_i^T * σ_growth
+            # Each node contributes via its strain-displacement matrix
             for i in range(4):
+                B_i = self._strain_displacement_matrix(grads[i])
+                # f_i = V * B_i^T * σ_growth
+                f_i = vol * B_i.T @ growth_stress
+
+                # Assemble into global force vector
                 for d in range(3):
                     global_dof = elem[i] * 3 + d
-                    # Force due to isotropic expansion
-                    force[global_dof] += alpha * elem_density * vol * grads[i, d]
+                    force[global_dof] += f_i[d]
 
         return force
 
