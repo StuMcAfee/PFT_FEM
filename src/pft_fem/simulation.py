@@ -243,10 +243,18 @@ class MRISimulator:
             # Set mesh resolution info from the loaded solver
             # The default solver uses 3mm voxel size
             self._mesh_voxel_size = (3.0, 3.0, 3.0)
+
+            # Compute mesh affine by scaling the atlas affine
+            # Only scale the diagonal (voxel size), not off-diagonal elements
             self._mesh_affine = self._atlas_affine.copy()
-            self._mesh_affine[:3, :3] *= 3.0
-            # Approximate mesh shape from node count
-            self._mesh_shape = self._atlas_shape
+            scale_factor = 3.0 / np.array(self._atlas_voxel_size)
+            for i in range(3):
+                self._mesh_affine[:3, i] *= scale_factor[i]
+
+            # Compute mesh shape from atlas shape at coarser resolution
+            self._mesh_shape = tuple(
+                int(s / (3.0 / v)) for s, v in zip(self._atlas_shape, self._atlas_voxel_size)
+            )
 
             return True
         except FileNotFoundError:
@@ -375,15 +383,14 @@ class MRISimulator:
         )
 
         # Step 2: Apply deformation to labels for tissue segmentation
-        from scipy import ndimage
         deformed_labels = self._apply_deformation_labels(
             self.atlas.labels,
             tumor_state
         )
 
-        # Step 3: Create tissue map from deformed labels
+        # Step 3: Create tissue map from deformed labels (pass template for CSF detection)
         tissue_map = self._create_tissue_map_from_labels(
-            deformed_labels, tumor_state
+            deformed_labels, tumor_state, deformed_template
         )
 
         # Step 4: Compute tissue-specific signal modulation
@@ -402,14 +409,23 @@ class MRISimulator:
                 modulation[mask] = signal_factor / ref_signal
 
         # Step 5: Generate MRI by modulating the deformed template
-        # Normalize template to 0-1 range for modulation
-        template_min = np.min(deformed_template[deformed_template > 0])
-        template_max = np.max(deformed_template)
-        if template_max > template_min:
-            normalized_template = (deformed_template - template_min) / (template_max - template_min)
-            normalized_template = np.clip(normalized_template, 0, 1)
+        # Create tissue mask (non-background regions)
+        tissue_mask = deformed_template > 0
+
+        # Normalize template to 0-1 range within tissue regions only
+        if np.sum(tissue_mask) > 0:
+            template_min = np.min(deformed_template[tissue_mask])
+            template_max = np.max(deformed_template[tissue_mask])
+            if template_max > template_min:
+                normalized_template = np.zeros_like(deformed_template)
+                normalized_template[tissue_mask] = (
+                    deformed_template[tissue_mask] - template_min
+                ) / (template_max - template_min)
+                normalized_template = np.clip(normalized_template, 0, 1)
+            else:
+                normalized_template = deformed_template / (template_max + 1e-6)
         else:
-            normalized_template = deformed_template / (template_max + 1e-6)
+            normalized_template = deformed_template / (np.max(deformed_template) + 1e-6)
 
         # Apply modulation to template
         image = normalized_template * modulation
@@ -435,7 +451,8 @@ class MRISimulator:
 
         Uses nearest-neighbor interpolation to preserve label values.
         """
-        if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.1:
+        # Use same threshold as _apply_deformation
+        if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.01:
             return labels
 
         from scipy import ndimage
@@ -489,27 +506,57 @@ class MRISimulator:
         self,
         labels: NDArray[np.int32],
         tumor_state: TumorState,
+        deformed_template: Optional[NDArray[np.float32]] = None,
     ) -> Dict[str, NDArray[np.bool_]]:
-        """Create tissue segmentation from (possibly deformed) labels."""
+        """
+        Create tissue segmentation from (possibly deformed) labels.
+
+        SUIT atlas labels:
+        - Labels 1-28: Cerebellar lobules (cortical gray matter)
+        - Labels 29-34: Deep cerebellar nuclei (gray matter structures)
+
+        For the synthetic atlas:
+        - Labels 5-7: Cerebellum (gray matter)
+        - Label 29: Brainstem (treated as white matter)
+        - Label 30: Fourth ventricle (CSF)
+
+        We detect which atlas is being used based on the label values present.
+        """
         tissue_map = {}
 
-        # Gray matter (cerebellar cortex)
-        tissue_map["gray_matter"] = (labels >= 1) & (labels <= 28)
+        # Detect atlas type based on labels present
+        unique_labels = np.unique(labels)
+        has_nuclei_labels = any(l in unique_labels for l in [31, 32, 33, 34])
 
-        # CSF (fourth ventricle)
-        tissue_map["csf"] = labels == 30
+        if has_nuclei_labels:
+            # Real SUIT atlas: labels 1-28 = lobules, 29-34 = nuclei (all gray matter)
+            # No explicit white matter or CSF labels
+            tissue_map["gray_matter"] = (labels >= 1) & (labels <= 34)
+            tissue_map["white_matter"] = np.zeros_like(labels, dtype=bool)
+            tissue_map["csf"] = np.zeros_like(labels, dtype=bool)
 
-        # White matter (approximate as brainstem)
-        tissue_map["white_matter"] = labels == 29
+            # Use template intensity to identify CSF (low intensity regions)
+            if deformed_template is not None:
+                template_mask = labels > 0
+                if np.sum(template_mask) > 0:
+                    # CSF typically has very low T1 signal
+                    threshold = np.percentile(deformed_template[template_mask], 10)
+                    tissue_map["csf"] = (deformed_template < threshold) & template_mask
+                    tissue_map["gray_matter"] = tissue_map["gray_matter"] & ~tissue_map["csf"]
+        else:
+            # Synthetic atlas or atlas with explicit tissue labels
+            # Labels 1-28: gray matter (cerebellar lobules)
+            tissue_map["gray_matter"] = (labels >= 1) & (labels <= 28)
+            # Label 29: brainstem/white matter (in synthetic atlas)
+            tissue_map["white_matter"] = labels == 29
+            # Label 30: fourth ventricle/CSF (in synthetic atlas)
+            tissue_map["csf"] = labels == 30
 
-        # Map tumor density to voxels
-        tumor_density = self._interpolate_to_volume(
-            tumor_state.cell_density
-        )
+        # Map tumor density to voxels (already interpolated from mesh nodes)
+        tumor_density = self._interpolate_to_volume(tumor_state.cell_density)
 
-        # Apply same deformation to tumor density
-        if self.mesh is not None and np.max(np.abs(tumor_state.displacement)) >= 0.1:
-            tumor_density = self._apply_deformation(tumor_density, tumor_state)
+        # NOTE: Do NOT deform tumor_density here - it's already in deformed space
+        # since it was interpolated from deformed mesh node positions
 
         # Define tumor regions based on density
         tumor_core = tumor_density > 0.5
@@ -536,7 +583,8 @@ class MRISimulator:
 
         # Remove tumor regions from normal tissue
         for tissue in ["gray_matter", "white_matter"]:
-            tissue_map[tissue] = tissue_map[tissue] & ~tumor_core & ~edema
+            if tissue in tissue_map:
+                tissue_map[tissue] = tissue_map[tissue] & ~tumor_core & ~edema
 
         return tissue_map
 
@@ -544,54 +592,18 @@ class MRISimulator:
         self,
         tumor_state: TumorState,
     ) -> Dict[str, NDArray[np.bool_]]:
-        """Create tissue segmentation including tumor."""
-        tissue_map = {}
+        """
+        Create tissue segmentation including tumor.
 
-        # Base tissues from atlas
-        labels = self.atlas.labels
-
-        # Gray matter (cerebellar cortex)
-        tissue_map["gray_matter"] = (labels >= 1) & (labels <= 28)
-
-        # CSF (fourth ventricle)
-        tissue_map["csf"] = labels == 30
-
-        # White matter (approximate as brainstem)
-        tissue_map["white_matter"] = labels == 29
-
-        # Map tumor density to voxels
-        tumor_density = self._interpolate_to_volume(
-            tumor_state.cell_density
+        DEPRECATED: Use _create_tissue_map_from_labels with deformed labels instead.
+        This method is kept for backward compatibility.
+        """
+        # Delegate to the new method with undeformed labels and template
+        return self._create_tissue_map_from_labels(
+            self.atlas.labels,
+            tumor_state,
+            self.atlas.template.astype(np.float32),
         )
-
-        # Define tumor regions based on density
-        tumor_core = tumor_density > 0.5
-        tumor_rim = (tumor_density > 0.1) & (tumor_density <= 0.5)
-
-        # Necrotic core (very high density region)
-        necrotic = tumor_density > self.tumor_params.necrotic_threshold
-
-        # Edema (around tumor)
-        from scipy import ndimage
-        dilated = ndimage.binary_dilation(
-            tumor_density > 0.1,
-            iterations=int(self.tumor_params.edema_extent / 2)
-        )
-        edema = dilated & (tumor_density < 0.1) & (labels > 0)
-
-        # Override base tissues with tumor/edema
-        tissue_map["tumor"] = tumor_core & ~necrotic
-        tissue_map["necrosis"] = necrotic
-        tissue_map["edema"] = edema
-
-        if self.tumor_params.enhancement_ring:
-            tissue_map["enhancement"] = tumor_rim
-
-        # Remove tumor regions from normal tissue
-        for tissue in ["gray_matter", "white_matter"]:
-            tissue_map[tissue] = tissue_map[tissue] & ~tumor_core & ~edema
-
-        return tissue_map
 
     def _interpolate_to_volume(
         self,
@@ -690,7 +702,8 @@ class MRISimulator:
         Uses multi-resolution interpolation: computes displacement from coarse
         mesh nodes and interpolates to full atlas resolution.
         """
-        if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.1:
+        # Lower threshold to ensure small displacements are visible
+        if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.01:
             return image
 
         from scipy import ndimage
@@ -775,7 +788,8 @@ class MRISimulator:
                 "Install with: pip install antspyx"
             )
 
-        if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.1:
+        # Use same threshold as _apply_deformation
+        if self.mesh is None or np.max(np.abs(tumor_state.displacement)) < 0.01:
             return image
 
         # Output at full atlas resolution
@@ -921,9 +935,9 @@ class MRISimulator:
             interpolation="nearestNeighbor"
         ).astype(np.int32)
 
-        # Step 3: Create tissue map from deformed labels
+        # Step 3: Create tissue map from deformed labels (pass template for CSF detection)
         tissue_map = self._create_tissue_map_from_labels(
-            deformed_labels, tumor_state
+            deformed_labels, tumor_state, deformed_template
         )
 
         # Step 4: Compute tissue-specific signal modulation
@@ -940,13 +954,23 @@ class MRISimulator:
                 modulation[mask] = signal_factor / ref_signal
 
         # Step 5: Generate MRI by modulating the deformed template
-        template_min = np.min(deformed_template[deformed_template > 0])
-        template_max = np.max(deformed_template)
-        if template_max > template_min:
-            normalized_template = (deformed_template - template_min) / (template_max - template_min)
-            normalized_template = np.clip(normalized_template, 0, 1)
+        # Create tissue mask (non-background regions)
+        tissue_mask = deformed_template > 0
+
+        # Normalize template to 0-1 range within tissue regions only
+        if np.sum(tissue_mask) > 0:
+            template_min = np.min(deformed_template[tissue_mask])
+            template_max = np.max(deformed_template[tissue_mask])
+            if template_max > template_min:
+                normalized_template = np.zeros_like(deformed_template)
+                normalized_template[tissue_mask] = (
+                    deformed_template[tissue_mask] - template_min
+                ) / (template_max - template_min)
+                normalized_template = np.clip(normalized_template, 0, 1)
+            else:
+                normalized_template = deformed_template / (template_max + 1e-6)
         else:
-            normalized_template = deformed_template / (template_max + 1e-6)
+            normalized_template = deformed_template / (np.max(deformed_template) + 1e-6)
 
         image = normalized_template * modulation * 1000
 
