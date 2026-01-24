@@ -650,6 +650,9 @@ class TumorState:
         num_nodes = mesh.num_nodes
         num_elements = mesh.num_elements
 
+        # Ensure seed_center is a numpy array
+        seed_center = np.asarray(seed_center, dtype=np.float64)
+
         # Initialize cell density with Gaussian seed
         distances = np.linalg.norm(mesh.nodes - seed_center, axis=1)
         cell_density = seed_density * np.exp(-(distances / seed_radius) ** 2)
