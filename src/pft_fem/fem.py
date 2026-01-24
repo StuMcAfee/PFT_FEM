@@ -354,8 +354,9 @@ class MaterialProperties:
 
     # Mass effect parameters for tumor-induced tissue displacement
     # These control how tumor growth creates new volume that displaces tissue
-    mass_effect_scaling: float = 3.0  # Amplification of displacement from mass addition
-    radial_displacement_factor: float = 1.5  # Additional radial outward force
+    # Higher values produce more visible displacement in the MRI (several mm)
+    mass_effect_scaling: float = 15.0  # Amplification of displacement from mass addition
+    radial_displacement_factor: float = 5.0  # Additional radial outward force
 
     # Anisotropy parameters for white matter
     anisotropy_ratio: float = 2.0  # Ratio of parallel/perpendicular stiffness
@@ -422,8 +423,8 @@ class MaterialProperties:
             diffusion_coefficient=0.1,
             carrying_capacity=1.0,
             growth_stress_coefficient=0.15,  # 15% volumetric strain at full density
-            mass_effect_scaling=3.0,  # Amplification for visible displacement
-            radial_displacement_factor=1.5,  # Radial force from tumor center
+            mass_effect_scaling=15.0,  # Amplification for visible displacement (~3mm)
+            radial_displacement_factor=5.0,  # Radial force from tumor center
             anisotropy_ratio=1.0,  # Isotropic
             fiber_direction=None,
         )
@@ -446,8 +447,8 @@ class MaterialProperties:
             diffusion_coefficient=0.2,  # Faster along fibers
             carrying_capacity=1.0,
             growth_stress_coefficient=0.15,  # 15% volumetric strain at full density
-            mass_effect_scaling=3.0,  # Amplification for visible displacement
-            radial_displacement_factor=1.5,  # Radial force from tumor center
+            mass_effect_scaling=15.0,  # Amplification for visible displacement (~3mm)
+            radial_displacement_factor=5.0,  # Radial force from tumor center
             anisotropy_ratio=2.0,  # 2x stiffer along fibers
             fiber_direction=fiber_direction,
         )
