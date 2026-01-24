@@ -343,20 +343,23 @@ class MaterialProperties:
     poisson_ratio: float = 0.45  # Nearly incompressible
 
     # Tumor growth parameters
-    proliferation_rate: float = 0.01  # 1/day
-    diffusion_coefficient: float = 0.1  # mm^2/day
+    # These defaults model a non-infiltrative, expansile mass (e.g., pilocytic astrocytoma)
+    # that grows as a solid mass with minimal invasion into surrounding tissue
+    proliferation_rate: float = 0.04  # 1/day - higher rate for solid mass growth
+    diffusion_coefficient: float = 0.01  # mm^2/day - very low for minimal infiltration
     carrying_capacity: float = 1.0  # Normalized max cell density
 
     # Mechanical coupling (eigenstrain formulation)
     # This represents volumetric strain per unit cell density.
-    # Value of 0.15 means 15% volumetric expansion at full tumor density.
-    growth_stress_coefficient: float = 0.15  # Volumetric strain per unit density
+    # Value of 0.25 means 25% volumetric expansion at full tumor density.
+    # Higher value produces more displacement for solid mass tumors.
+    growth_stress_coefficient: float = 0.25  # Volumetric strain per unit density
 
     # Mass effect parameters for tumor-induced tissue displacement
     # These control how tumor growth creates new volume that displaces tissue
-    # Higher values produce more visible displacement in the MRI (several mm)
-    mass_effect_scaling: float = 15.0  # Amplification of displacement from mass addition
-    radial_displacement_factor: float = 5.0  # Additional radial outward force
+    # Higher values for expansile tumors that push tissue aside rather than infiltrate
+    mass_effect_scaling: float = 30.0  # Amplification of displacement from mass addition
+    radial_displacement_factor: float = 12.0  # Additional radial outward force
 
     # Anisotropy parameters for white matter
     anisotropy_ratio: float = 2.0  # Ratio of parallel/perpendicular stiffness
@@ -372,12 +375,14 @@ class MaterialProperties:
         TissueType.SKULL: 1000.0,  # Very stiff (immovable)
     })
 
+    # Tissue diffusion multipliers - configured for non-infiltrative tumor
+    # Low values prevent infiltration; tumor cells stay within tumor boundary
     tissue_diffusion_multipliers: Dict[TissueType, float] = field(default_factory=lambda: {
-        TissueType.GRAY_MATTER: 1.0,
-        TissueType.WHITE_MATTER: 2.0,  # Faster along fiber tracts
-        TissueType.CSF: 0.1,  # Barrier to invasion
-        TissueType.TUMOR: 0.5,
-        TissueType.EDEMA: 1.5,
+        TissueType.GRAY_MATTER: 0.5,  # Reduced - limits infiltration
+        TissueType.WHITE_MATTER: 0.8,  # Reduced - less fiber tract spread
+        TissueType.CSF: 0.01,  # Strong barrier to invasion
+        TissueType.TUMOR: 1.0,  # Normal diffusion within tumor mass
+        TissueType.EDEMA: 0.3,  # Reduced - limits spread through edema
         TissueType.SKULL: 0.0,  # No diffusion through skull
     })
 

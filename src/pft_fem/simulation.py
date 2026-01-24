@@ -54,24 +54,28 @@ class TumorParameters:
     """
     Parameters defining tumor characteristics for simulation.
 
+    Defaults are configured for a non-infiltrative, expansile mass tumor
+    (e.g., pilocytic astrocytoma or medulloblastoma) that grows as a solid
+    mass filling ~30% of the posterior fossa with significant tissue displacement.
+
     Attributes:
         center: Tumor seed center in mm (relative to atlas origin).
         initial_radius: Initial tumor radius in mm.
         initial_density: Initial tumor cell density (0-1).
         proliferation_rate: Cell proliferation rate (1/day).
-        diffusion_rate: Cell migration rate (mm^2/day).
+        diffusion_rate: Cell migration rate (mm^2/day) - low for non-infiltrative.
         necrotic_threshold: Density threshold for necrotic core.
         edema_extent: Extent of peritumoral edema in mm.
         enhancement_ring: Whether tumor has enhancing rim.
     """
 
     center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-    initial_radius: float = 5.0
-    initial_density: float = 0.8
-    proliferation_rate: float = 0.012
-    diffusion_rate: float = 0.15
-    necrotic_threshold: float = 0.9
-    edema_extent: float = 10.0
+    initial_radius: float = 10.0  # Larger seed for expansile mass
+    initial_density: float = 0.9  # Higher density for solid tumor
+    proliferation_rate: float = 0.04  # Higher rate for solid mass growth
+    diffusion_rate: float = 0.01  # Very low - minimal infiltration
+    necrotic_threshold: float = 0.95  # Higher threshold - less central necrosis
+    edema_extent: float = 5.0  # Less edema for non-infiltrative tumor
     enhancement_ring: bool = True
 
     def to_material_properties(self) -> MaterialProperties:
