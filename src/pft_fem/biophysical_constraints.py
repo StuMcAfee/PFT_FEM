@@ -10,7 +10,7 @@ This module provides:
 
 Default configuration:
 - Template: ICBM-152 in MNI space
-- Tumor origin: MNI coordinates [1, -61, -34] (vermis)
+- Tumor origin: MNI coordinates [2, -64, -36] (vermis/fourth ventricle region)
 - Modeled region: Posterior fossa (cerebellum + brainstem only)
 
 References:
@@ -29,8 +29,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-# Default tumor origin in MNI coordinates (vermis)
-DEFAULT_TUMOR_ORIGIN_MNI = np.array([1.0, -61.0, -34.0])
+# Default tumor origin in MNI coordinates (vermis/fourth ventricle region)
+DEFAULT_TUMOR_ORIGIN_MNI = np.array([2.0, -64.0, -36.0])
 
 # Posterior fossa bounding box in MNI coordinates (approximate)
 # Covers cerebellum and brainstem

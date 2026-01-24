@@ -4,11 +4,29 @@ Finite Element Method solver for tumor growth simulation.
 Implements a coupled reaction-diffusion and mechanical deformation model
 for simulating tumor growth in brain tissue.
 
+Mass Effect Model:
+    The tumor growth model simulates the creation of new volume within the
+    tumor matrix over time. As new tumor cells are created (conceptually new
+    nodes), they displace surrounding brain tissue. The brain tissue is
+    constrained within the posterior cranial fossa (fixed skull boundary),
+    leading to compression of tissue structures.
+
+    Key components:
+    1. Reaction-diffusion: Models cell proliferation and migration, effectively
+       creating new cells over time that increase tumor volume.
+    2. Eigenstrain formulation: Volumetric expansion creates stress that pushes
+       tissue outward from tumor regions.
+    3. Radial mass effect: Additional force directed radially outward from
+       tumor center, modeling pressure from new volume addition.
+    4. Fixed boundary: Skull constraint prevents tissue from escaping, creating
+       compression of brain tissue against the posterior fossa boundary.
+
 Supports:
 - Anisotropic material properties for white matter (fiber-aligned resistance)
 - Compressible gray matter with uniform mechanical response
 - Skull/boundary immovability constraints
 - Tissue-specific diffusion and growth parameters
+- Mass effect scaling for visible tissue displacement
 """
 
 from dataclasses import dataclass, field
@@ -301,12 +319,12 @@ if TYPE_CHECKING:
 class TissueType(Enum):
     """Brain tissue types with different mechanical properties."""
 
-    GRAY_MATTER = "gray_matter"
-    WHITE_MATTER = "white_matter"
-    CSF = "csf"
-    TUMOR = "tumor"
-    EDEMA = "edema"
-    SKULL = "skull"  # Immovable boundary
+    GRAY_MATTER = 0
+    WHITE_MATTER = 1
+    CSF = 2
+    TUMOR = 3
+    EDEMA = 4
+    SKULL = 5  # Immovable boundary
 
 
 @dataclass
@@ -333,6 +351,11 @@ class MaterialProperties:
     # This represents volumetric strain per unit cell density.
     # Value of 0.15 means 15% volumetric expansion at full tumor density.
     growth_stress_coefficient: float = 0.15  # Volumetric strain per unit density
+
+    # Mass effect parameters for tumor-induced tissue displacement
+    # These control how tumor growth creates new volume that displaces tissue
+    mass_effect_scaling: float = 3.0  # Amplification of displacement from mass addition
+    radial_displacement_factor: float = 1.5  # Additional radial outward force
 
     # Anisotropy parameters for white matter
     anisotropy_ratio: float = 2.0  # Ratio of parallel/perpendicular stiffness
@@ -399,6 +422,8 @@ class MaterialProperties:
             diffusion_coefficient=0.1,
             carrying_capacity=1.0,
             growth_stress_coefficient=0.15,  # 15% volumetric strain at full density
+            mass_effect_scaling=3.0,  # Amplification for visible displacement
+            radial_displacement_factor=1.5,  # Radial force from tumor center
             anisotropy_ratio=1.0,  # Isotropic
             fiber_direction=None,
         )
@@ -421,6 +446,8 @@ class MaterialProperties:
             diffusion_coefficient=0.2,  # Faster along fibers
             carrying_capacity=1.0,
             growth_stress_coefficient=0.15,  # 15% volumetric strain at full density
+            mass_effect_scaling=3.0,  # Amplification for visible displacement
+            radial_displacement_factor=1.5,  # Radial force from tumor center
             anisotropy_ratio=2.0,  # 2x stiffer along fibers
             fiber_direction=fiber_direction,
         )
@@ -587,12 +614,18 @@ class TumorState:
         displacement: Tissue displacement at each node (N, 3).
         stress: Stress tensor at each element (M, 6) in Voigt notation.
         time: Current simulation time in days.
+        tumor_center: Current tumor center of mass in mm.
+        initial_volume: Initial tumor volume at t=0 (for mass effect calculation).
+        current_volume: Current tumor volume (for tracking growth).
     """
 
     cell_density: NDArray[np.float64]
     displacement: NDArray[np.float64]
     stress: NDArray[np.float64]
     time: float = 0.0
+    tumor_center: Optional[NDArray[np.float64]] = None
+    initial_volume: float = 0.0
+    current_volume: float = 0.0
 
     @classmethod
     def initial(
@@ -627,11 +660,18 @@ class TumorState:
         # Initialize stress to zero
         stress = np.zeros((num_elements, 6), dtype=np.float64)
 
+        # Compute initial tumor volume (approximate from Gaussian seed)
+        # Volume where density > 0.1 threshold
+        initial_vol = (4.0 / 3.0) * np.pi * (seed_radius ** 3) * seed_density
+
         return cls(
             cell_density=cell_density,
             displacement=displacement,
             stress=stress,
             time=0.0,
+            tumor_center=seed_center.copy(),
+            initial_volume=initial_vol,
+            current_volume=initial_vol,
         )
 
 
@@ -1355,23 +1395,35 @@ class TumorGrowthSolver:
         """
         Perform one time step of the simulation.
 
+        Models tumor growth as the creation of new volume within the tumor matrix,
+        which displaces and compresses surrounding brain tissue constrained within
+        the posterior cranial fossa.
+
         Args:
             state: Current tumor state.
             dt: Time step in days.
 
         Returns:
-            Updated TumorState.
+            Updated TumorState with new density, displacement, stress, and volume.
         """
         # Step 1: Reaction-diffusion for tumor cell density
+        # This models cell proliferation and migration, effectively creating new cells
         new_density = self._reaction_diffusion_step(state.cell_density, dt)
 
-        # Step 2: Compute growth-induced force
-        force = self._compute_growth_force(new_density)
+        # Step 2: Compute new tumor center and volume
+        # The volume increase represents new nodes being created in the tumor
+        new_center = self._compute_tumor_centroid(new_density)
+        new_volume = self._compute_tumor_volume_internal(new_density)
 
-        # Step 3: Solve mechanical equilibrium
+        # Step 3: Compute growth-induced force with mass effect
+        # The force models new tumor volume displacing surrounding tissue
+        force = self._compute_growth_force(new_density, tumor_center=new_center)
+
+        # Step 4: Solve mechanical equilibrium
+        # Tissue displacement from tumor mass effect
         new_displacement = self._solve_mechanical_equilibrium(force)
 
-        # Step 4: Compute stress
+        # Step 5: Compute stress (shows compression in surrounding tissue)
         new_stress = self._compute_stress(new_displacement)
 
         return TumorState(
@@ -1379,7 +1431,32 @@ class TumorGrowthSolver:
             displacement=new_displacement,
             stress=new_stress,
             time=state.time + dt,
+            tumor_center=new_center,
+            initial_volume=state.initial_volume,
+            current_volume=new_volume,
         )
+
+    def _compute_tumor_volume_internal(
+        self,
+        density: NDArray[np.float64],
+        threshold: float = 0.1,
+    ) -> float:
+        """
+        Compute tumor volume from density field.
+
+        Args:
+            density: Tumor cell density at each node.
+            threshold: Density threshold for tumor boundary.
+
+        Returns:
+            Tumor volume in mm^3.
+        """
+        volume = 0.0
+        for e, elem in enumerate(self.mesh.elements):
+            elem_density = np.mean(density[elem])
+            if elem_density >= threshold:
+                volume += self._element_volumes[e] * elem_density
+        return volume
 
     def _reaction_diffusion_step(
         self,
@@ -1415,21 +1492,41 @@ class TumorGrowthSolver:
     def _compute_growth_force(
         self,
         density: NDArray[np.float64],
+        tumor_center: Optional[NDArray[np.float64]] = None,
     ) -> NDArray[np.float64]:
         """
         Compute force vector due to tumor growth (mass effect).
 
-        Uses the eigenstrain (thermal expansion) formulation:
-        - Growth causes isotropic volumetric expansion: ε_growth = α * c * [1,1,1,0,0,0]^T
-        - This creates stress via constitutive law: σ_growth = C * ε_growth
-        - Equivalent nodal forces: f = ∫ B^T * σ_growth dV
+        This method models tumor growth as the creation of new material volume
+        that displaces surrounding brain tissue. The approach combines:
 
-        The growth_stress_coefficient α represents the volumetric strain per unit
-        cell density. A value of 0.1 means 10% volumetric expansion at full density.
+        1. Eigenstrain formulation: Volumetric expansion within tumor elements
+           creates stress that pushes outward via: σ_growth = C * ε_growth
+
+        2. Mass addition force: New tumor volume creates radial pressure that
+           displaces tissue outward from the tumor center. This models the
+           physical effect of new cells being created within the tumor matrix.
+
+        The combination creates realistic tissue displacement and compression
+        against the fixed posterior fossa boundary (skull).
+
+        Args:
+            density: Current tumor cell density at each node.
+            tumor_center: Center of tumor mass for radial force calculation.
+                         If None, computed from density-weighted centroid.
+
+        Returns:
+            Force vector (3*N,) for mechanical equilibrium.
         """
         n = self.mesh.num_nodes
         alpha = self.properties.growth_stress_coefficient
+        mass_scaling = self.properties.mass_effect_scaling
+        radial_factor = self.properties.radial_displacement_factor
         force = np.zeros(3 * n)
+
+        # Compute tumor center of mass if not provided
+        if tumor_center is None:
+            tumor_center = self._compute_tumor_centroid(density)
 
         # Get base constitutive matrix (will be modified per-element if needed)
         lam, mu = self.properties.lame_parameters()
@@ -1445,6 +1542,16 @@ class TumorGrowthSolver:
         # Isotropic growth strain direction: [1, 1, 1, 0, 0, 0]
         # This represents uniform volumetric expansion
         growth_strain_dir = np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+
+        # Compute total tumor volume for mass effect scaling
+        total_tumor_volume = 0.0
+        for e, elem in enumerate(self.mesh.elements):
+            elem_density = np.mean(density[elem])
+            if elem_density > 0.1:
+                total_tumor_volume += self._element_volumes[e] * elem_density
+
+        # Scale mass effect by tumor volume (larger tumors create more displacement)
+        volume_factor = 1.0 + np.log1p(total_tumor_volume / 100.0)
 
         for e, elem in enumerate(self.mesh.elements):
             vol = self._element_volumes[e]
@@ -1463,9 +1570,10 @@ class TumorGrowthSolver:
             else:
                 C = C_base
 
-            # Growth strain magnitude: ε_growth = α * c
-            # Full growth strain vector: [α*c, α*c, α*c, 0, 0, 0]
-            growth_strain = alpha * elem_density * growth_strain_dir
+            # Enhanced growth strain with mass effect scaling
+            # The mass_scaling amplifies displacement to model new volume creation
+            effective_alpha = alpha * mass_scaling * volume_factor
+            growth_strain = effective_alpha * elem_density * growth_strain_dir
 
             # Growth stress: σ_growth = C * ε_growth
             growth_stress = C @ growth_strain
@@ -1473,16 +1581,72 @@ class TumorGrowthSolver:
             # Compute equivalent nodal forces: f_i = V * B_i^T * σ_growth
             # Each node contributes via its strain-displacement matrix
             for i in range(4):
+                node_idx = elem[i]
                 B_i = self._strain_displacement_matrix(grads[i])
-                # f_i = V * B_i^T * σ_growth
+
+                # Standard eigenstrain force
                 f_i = vol * B_i.T @ growth_stress
+
+                # Add radial mass-effect force
+                # This models new material pushing tissue outward from tumor center
+                node_pos = self.mesh.nodes[node_idx]
+                radial_vec = node_pos - tumor_center
+                radial_dist = np.linalg.norm(radial_vec)
+
+                if radial_dist > 1e-6:
+                    # Normalize to get direction
+                    radial_dir = radial_vec / radial_dist
+
+                    # Radial force decreases with distance (pressure decay)
+                    # Force is proportional to density and inversely to distance
+                    radial_magnitude = (
+                        radial_factor * elem_density * vol * mu
+                        / (radial_dist + 1.0)  # +1 prevents singularity at center
+                    )
+
+                    # Add radial component to force
+                    f_i += radial_magnitude * radial_dir
 
                 # Assemble into global force vector
                 for d in range(3):
-                    global_dof = elem[i] * 3 + d
+                    global_dof = node_idx * 3 + d
                     force[global_dof] += f_i[d]
 
         return force
+
+    def _compute_tumor_centroid(
+        self,
+        density: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        """
+        Compute the density-weighted centroid of the tumor.
+
+        Args:
+            density: Tumor cell density at each node.
+
+        Returns:
+            3D coordinates of tumor center of mass.
+        """
+        # Weighted average of node positions
+        total_mass = 0.0
+        centroid = np.zeros(3)
+
+        for e, elem in enumerate(self.mesh.elements):
+            elem_density = np.mean(density[elem])
+            if elem_density > 0.01:
+                vol = self._element_volumes[e]
+                mass = vol * elem_density
+                elem_centroid = np.mean(self.mesh.nodes[elem], axis=0)
+                centroid += mass * elem_centroid
+                total_mass += mass
+
+        if total_mass > 1e-6:
+            centroid /= total_mass
+        else:
+            # Default to mesh center if no tumor
+            centroid = np.mean(self.mesh.nodes, axis=0)
+
+        return centroid
 
     def _solve_mechanical_equilibrium(
         self,
@@ -1731,6 +1895,8 @@ class TumorGrowthSolver:
                     "diffusion_coefficient": props.diffusion_coefficient,
                     "carrying_capacity": props.carrying_capacity,
                     "growth_stress_coefficient": props.growth_stress_coefficient,
+                    "mass_effect_scaling": props.mass_effect_scaling,
+                    "radial_displacement_factor": props.radial_displacement_factor,
                     "anisotropy_ratio": props.anisotropy_ratio,
                     "fiber_direction": props.fiber_direction.tolist() if props.fiber_direction is not None else None,
                 })
@@ -1739,7 +1905,7 @@ class TumorGrowthSolver:
 
         # Save metadata
         metadata = {
-            "version": "1.1",
+            "version": "1.2",
             "boundary_condition": self.boundary_condition,
             "num_nodes": len(self.mesh.nodes),
             "num_elements": len(self.mesh.elements),
@@ -1751,6 +1917,8 @@ class TumorGrowthSolver:
                 "diffusion_coefficient": self.properties.diffusion_coefficient,
                 "carrying_capacity": self.properties.carrying_capacity,
                 "growth_stress_coefficient": self.properties.growth_stress_coefficient,
+                "mass_effect_scaling": self.properties.mass_effect_scaling,
+                "radial_displacement_factor": self.properties.radial_displacement_factor,
                 "anisotropy_ratio": self.properties.anisotropy_ratio,
             },
             "solver_config": self.solver_config.to_dict(),
@@ -1801,7 +1969,9 @@ class TumorGrowthSolver:
             proliferation_rate=props_data.get("proliferation_rate", 0.01),
             diffusion_coefficient=props_data.get("diffusion_coefficient", 0.1),
             carrying_capacity=props_data.get("carrying_capacity", 1.0),
-            growth_stress_coefficient=props_data.get("growth_stress_coefficient", 0.1),
+            growth_stress_coefficient=props_data.get("growth_stress_coefficient", 0.15),
+            mass_effect_scaling=props_data.get("mass_effect_scaling", 3.0),
+            radial_displacement_factor=props_data.get("radial_displacement_factor", 1.5),
             anisotropy_ratio=props_data.get("anisotropy_ratio", 2.0),
         )
 
@@ -1855,6 +2025,8 @@ class TumorGrowthSolver:
                     diffusion_coefficient=ep["diffusion_coefficient"],
                     carrying_capacity=ep["carrying_capacity"],
                     growth_stress_coefficient=ep["growth_stress_coefficient"],
+                    mass_effect_scaling=ep.get("mass_effect_scaling", 3.0),
+                    radial_displacement_factor=ep.get("radial_displacement_factor", 1.5),
                     anisotropy_ratio=ep["anisotropy_ratio"],
                     fiber_direction=fiber_dir,
                 ))

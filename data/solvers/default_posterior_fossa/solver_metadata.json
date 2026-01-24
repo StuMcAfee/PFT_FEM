@@ -1,5 +1,5 @@
 {
-  "version": "1.1",
+  "version": "1.2",
   "boundary_condition": "fixed",
   "num_nodes": 19210,
   "num_elements": 79940,
@@ -11,6 +11,8 @@
     "diffusion_coefficient": 0.1,
     "carrying_capacity": 1.0,
     "growth_stress_coefficient": 0.15,
+    "mass_effect_scaling": 3.0,
+    "radial_displacement_factor": 1.5,
     "anisotropy_ratio": 2.0
   },
   "solver_config": {

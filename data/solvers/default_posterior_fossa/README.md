@@ -21,9 +21,8 @@ solver = TumorGrowthSolver.load_default()
 
 # Create initial tumor state
 state = TumorState.initial(
-    num_nodes=len(solver.mesh.nodes),
-    num_elements=len(solver.mesh.elements),
-    seed_location=[1.0, -61.0, -34.0],  # Vermis in MNI coordinates
+    mesh=solver.mesh,
+    seed_center=[2.0, -64.0, -36.0],  # Vermis/fourth ventricle in MNI coordinates
 )
 
 # Run simulation
