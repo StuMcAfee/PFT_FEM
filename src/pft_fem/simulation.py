@@ -70,7 +70,7 @@ class TumorParameters:
     """
 
     center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-    initial_radius: float = 10.0  # Larger seed for expansile mass
+    initial_radius: float = 1.0  # Small seed for tumor growth
     initial_density: float = 0.9  # Higher density for solid tumor
     proliferation_rate: float = 0.04  # Higher rate for solid mass growth
     diffusion_rate: float = 0.01  # Very low - minimal infiltration
