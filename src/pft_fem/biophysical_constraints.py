@@ -1647,6 +1647,67 @@ class BiophysicalConstraints:
 
         return skull[voxel[0], voxel[1], voxel[2]]
 
+    def _compute_anterior_brainstem_boundary(
+        self,
+        mesh_nodes: NDArray[np.float64],
+    ) -> NDArray[np.int32]:
+        """
+        Identify nodes on the anterior boundary of the brainstem.
+
+        The anterior surface of the brainstem is bounded by the clivus (petrous
+        bone), which should act as a hard constraint similar to the skull. This
+        prevents unrealistic anterior tumor expansion.
+
+        In MNI coordinates:
+        - Y axis: anterior-posterior (positive Y = anterior)
+        - The brainstem's anterior surface faces the clivus
+
+        Approach:
+        - For each X-Z column in the mesh, find the node with maximum Y
+        - These nodes form the anterior boundary
+
+        Args:
+            mesh_nodes: Node positions in MNI coordinates, shape (N, 3)
+
+        Returns:
+            Indices of nodes on the anterior brainstem boundary
+        """
+        if len(mesh_nodes) == 0:
+            return np.array([], dtype=np.int32)
+
+        # Use coarse binning to find anterior-most nodes in each X-Z column
+        # Bin size of 3mm matches typical coarse mesh resolution
+        bin_size = 3.0
+
+        # Get X-Z range
+        x_coords = mesh_nodes[:, 0]
+        z_coords = mesh_nodes[:, 2]
+        y_coords = mesh_nodes[:, 1]
+
+        # Create bins for X-Z grid
+        x_min, x_max = x_coords.min(), x_coords.max()
+        z_min, z_max = z_coords.min(), z_coords.max()
+
+        # Dictionary to store max-Y node index for each X-Z bin
+        anterior_nodes: Dict[Tuple[int, int], Tuple[int, float]] = {}
+
+        for node_idx, pos in enumerate(mesh_nodes):
+            # Compute bin indices
+            x_bin = int((pos[0] - x_min) / bin_size)
+            z_bin = int((pos[2] - z_min) / bin_size)
+            bin_key = (x_bin, z_bin)
+
+            y_val = pos[1]  # Y coordinate (anterior-posterior)
+
+            # Keep track of node with maximum Y (most anterior) in each bin
+            if bin_key not in anterior_nodes or y_val > anterior_nodes[bin_key][1]:
+                anterior_nodes[bin_key] = (node_idx, y_val)
+
+        # Extract node indices
+        anterior_indices = [idx for idx, _ in anterior_nodes.values()]
+
+        return np.array(anterior_indices, dtype=np.int32)
+
     def get_boundary_nodes(
         self,
         mesh_nodes: NDArray[np.float64],
@@ -1654,7 +1715,13 @@ class BiophysicalConstraints:
         """
         Identify mesh nodes that should have fixed boundary conditions.
 
-        This includes skull boundary and any other immovable structures.
+        This includes:
+        1. Skull boundary nodes (computed from dilated brain mask)
+        2. Anterior brainstem boundary nodes (clivus - petrous bone)
+
+        The anterior brainstem boundary represents the clivus, which acts as
+        a hard constraint preventing anterior tumor expansion into the prepontine
+        cistern region.
 
         Args:
             mesh_nodes: Node positions, shape (N, 3)
@@ -1662,15 +1729,20 @@ class BiophysicalConstraints:
         Returns:
             Indices of boundary nodes
         """
-        boundary_indices = []
+        boundary_indices = set()
         skull = self.compute_skull_boundary()
         segmentation = self.load_tissue_segmentation()
 
+        # Add skull boundary nodes
         for i, pos in enumerate(mesh_nodes):
             if self.is_skull_boundary(pos):
-                boundary_indices.append(i)
+                boundary_indices.add(i)
 
-        return np.array(boundary_indices, dtype=np.int32)
+        # Add anterior brainstem boundary (clivus)
+        anterior_nodes = self._compute_anterior_brainstem_boundary(mesh_nodes)
+        boundary_indices.update(anterior_nodes)
+
+        return np.array(sorted(boundary_indices), dtype=np.int32)
 
     def assign_node_tissues(
         self,
