@@ -8,7 +8,7 @@ This directory contains a precomputed FEM solver for posterior fossa tumor simul
 - **Region**: Posterior fossa (cerebellum + brainstem)
 - **Tissue segmentation**: MNI152 FAST segmentation (GM/WM/CSF)
 - **Fiber orientations**: HCP1065 DTI atlas
-- **Boundary condition**: Fixed (skull immovable)
+- **Boundary condition**: Skull fixed, CSF free (fourth ventricle can be displaced)
 - **Voxel size**: 1.0 mm isotropic
 
 ## Usage
