@@ -970,7 +970,7 @@ print(f"Generated {len(result.mri_images)} MRI sequences")
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | `center` | (0, 0, 0) | Within atlas bounds | Tumor seed location (mm) |
-| `initial_radius` | 2.0 | 1.0 - 20.0 | Starting radius (mm) |
+| `initial_radius` | 2.5 | 1.0 - 20.0 | Starting radius (mm) |
 | `proliferation_rate` | 0.012 | 0.001 - 0.1 | Growth rate (1/day) |
 | `diffusion_rate` | 0.15 | 0.01 - 1.0 | Spread rate (mm²/day) |
 | `carrying_capacity` | 1.0 | 0.5 - 1.0 | Max cell density |

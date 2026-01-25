@@ -40,8 +40,8 @@ def main(args: Optional[list] = None) -> int:
     parser.add_argument(
         "-d", "--duration",
         type=float,
-        default=120.0,
-        help="Simulation duration in days (default: 120)",
+        default=365.0,
+        help="Simulation duration in days (default: 365)",
     )
 
     parser.add_argument(
@@ -56,8 +56,8 @@ def main(args: Optional[list] = None) -> int:
     parser.add_argument(
         "--tumor-radius",
         type=float,
-        default=2.0,
-        help="Initial tumor radius in mm (default: 2)",
+        default=2.5,
+        help="Initial tumor radius in mm (default: 2.5)",
     )
 
     parser.add_argument(
