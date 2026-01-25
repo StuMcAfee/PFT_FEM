@@ -396,6 +396,18 @@ class MaterialProperties:
         TissueType.SKULL: 0.30,  # Standard bone value
     })
 
+    # Tissue-specific carrying capacity multipliers
+    # Higher values allow more tumor growth in those regions (less resistance)
+    # CSF-filled spaces (like fourth ventricle) offer minimal resistance to tumor expansion
+    tissue_carrying_capacity_multipliers: Dict[TissueType, float] = field(default_factory=lambda: {
+        TissueType.GRAY_MATTER: 1.0,  # Baseline
+        TissueType.WHITE_MATTER: 1.0,  # Same as gray matter
+        TissueType.CSF: 2.0,  # 2x capacity - tumor can easily fill CSF spaces
+        TissueType.TUMOR: 1.0,  # Normal within tumor
+        TissueType.EDEMA: 1.2,  # Slightly easier growth in edematous tissue
+        TissueType.SKULL: 0.0,  # No growth in skull
+    })
+
     @classmethod
     def for_tissue(cls, tissue_type: TissueType) -> "MaterialProperties":
         """Create material properties for a specific tissue type."""
@@ -638,7 +650,7 @@ class TumorState:
         cls,
         mesh: TetMesh,
         seed_center: NDArray[np.float64],
-        seed_radius: float = 2.0,
+        seed_radius: float = 2.5,
         seed_density: float = 0.5,
     ) -> "TumorState":
         """
@@ -880,7 +892,11 @@ class TumorGrowthSolver:
         Args:
             mesh: Tetrahedral mesh for FEM.
             properties: Material properties (uses defaults if None).
-            boundary_condition: Boundary condition type ("fixed", "skull", or "free").
+            boundary_condition: Boundary condition type:
+                - "fixed": All boundary nodes are immovable
+                - "skull": Only skull boundary nodes are fixed
+                - "skull_csf_free": Skull fixed, CSF nodes free (recommended for
+                  posterior fossa tumors - allows expansion into fourth ventricle)
             biophysical_constraints: Optional biophysical constraints for tissue-specific
                                     material properties, fiber orientation, and boundaries.
             solver_config: Solver configuration for performance/accuracy tradeoffs.
@@ -985,6 +1001,68 @@ class TumorGrowthSolver:
             return self.mesh.boundary_nodes
 
         return self.biophysical_constraints.get_boundary_nodes(self.mesh.nodes)
+
+    def _get_csf_nodes(self) -> NDArray[np.int32]:
+        """
+        Get nodes in CSF regions (including fourth ventricle).
+
+        These nodes can be given free boundary conditions since CSF
+        can be displaced with minimal resistance.
+
+        Returns:
+            Array of node indices in CSF regions.
+        """
+        if self._node_tissues is None:
+            return np.array([], dtype=np.int32)
+
+        # BrainTissue.CSF = 1
+        csf_mask = self._node_tissues == 1
+        return np.where(csf_mask)[0].astype(np.int32)
+
+    def _get_node_tissue_type(self, node_idx: int) -> TissueType:
+        """Get the tissue type for a node."""
+        if self._node_tissues is None:
+            return TissueType.GRAY_MATTER
+
+        brain_tissue = self._node_tissues[node_idx]
+
+        # Map from BrainTissue enum values to TissueType
+        tissue_map = {
+            0: TissueType.CSF,  # BACKGROUND treated as CSF
+            1: TissueType.CSF,
+            2: TissueType.GRAY_MATTER,
+            3: TissueType.WHITE_MATTER,
+            4: TissueType.SKULL,
+            5: TissueType.SKULL,  # SCALP treated as skull boundary
+        }
+        return tissue_map.get(brain_tissue, TissueType.GRAY_MATTER)
+
+    def _compute_node_carrying_capacities(self) -> NDArray[np.float64]:
+        """
+        Compute tissue-specific carrying capacities for all nodes.
+
+        CSF-filled spaces have higher carrying capacity (lower resistance),
+        allowing tumors to grow more easily into these regions. This models
+        the biophysical reality that tumors preferentially expand into the
+        fourth ventricle and other CSF spaces due to minimal tissue resistance.
+
+        Returns:
+            Array of carrying capacity values for each node.
+        """
+        n_nodes = self.mesh.num_nodes
+        base_K = self.properties.carrying_capacity
+        capacities = np.full(n_nodes, base_K, dtype=np.float64)
+
+        if self._node_tissues is not None:
+            # Apply tissue-specific multipliers
+            multipliers = self.properties.tissue_carrying_capacity_multipliers
+
+            for i in range(n_nodes):
+                tissue_type = self._get_node_tissue_type(i)
+                mult = multipliers.get(tissue_type, 1.0)
+                capacities[i] = base_K * mult
+
+        return capacities
 
     def _compute_shape_gradients(self) -> List[NDArray[np.float64]]:
         """Compute shape function gradients for each element."""
@@ -1268,6 +1346,8 @@ class TumorGrowthSolver:
             K = self._apply_fixed_bc(K)
         elif self.boundary_condition == "skull":
             K = self._apply_skull_bc(K)
+        elif self.boundary_condition == "skull_csf_free":
+            K = self._apply_skull_csf_free_bc(K)
 
         return K
 
@@ -1316,6 +1396,47 @@ class TumorGrowthSolver:
         skull_nodes = self._get_skull_boundary_nodes()
 
         for node_idx in skull_nodes:
+            for dof in range(3):
+                global_dof = node_idx * 3 + dof
+                # Set row to zero except diagonal
+                K[global_dof, :] = 0
+                K[:, global_dof] = 0
+                K[global_dof, global_dof] = 1.0
+
+        return K.tocsr()
+
+    def _apply_skull_csf_free_bc(
+        self,
+        K: sparse.csr_matrix,
+    ) -> sparse.csr_matrix:
+        """
+        Apply boundary conditions with free CSF (fourth ventricle) regions.
+
+        This boundary condition mode:
+        1. Fixes skull boundary nodes (immovable, like brain-skull interface)
+        2. Leaves CSF nodes completely free (zero traction)
+
+        This models the biophysical reality that CSF in the fourth ventricle
+        can be displaced with minimal resistance as tumors expand. The fluid
+        effectively offers no mechanical resistance - tumors fill this space
+        first because there is no tissue to push against.
+
+        Returns:
+            Modified stiffness matrix with boundary conditions applied.
+        """
+        K = K.tolil()
+
+        # Get skull boundary nodes (fixed)
+        skull_nodes = set(self._get_skull_boundary_nodes())
+
+        # Get CSF nodes (free - do not constrain these)
+        csf_nodes = set(self._get_csf_nodes())
+
+        # Only constrain skull nodes that are NOT CSF
+        # (this handles the case where skull/CSF regions might overlap at boundaries)
+        constrained_nodes = skull_nodes - csf_nodes
+
+        for node_idx in constrained_nodes:
             for dof in range(3):
                 global_dof = node_idx * 3 + dof
                 # Set row to zero except diagonal
@@ -1477,12 +1598,26 @@ class TumorGrowthSolver:
 
         Uses implicit Euler for diffusion, explicit for reaction.
         dc/dt = D * laplacian(c) + rho * c * (1 - c/K)
+
+        Tissue-specific carrying capacity allows tumors to grow more easily
+        into CSF-filled spaces (like the fourth ventricle), modeling the
+        biophysical reality that these fluid-filled regions offer minimal
+        resistance to tumor expansion.
         """
         rho = self.properties.proliferation_rate
-        K = self.properties.carrying_capacity
 
-        # Reaction term (logistic growth)
-        reaction = rho * density * (1 - density / K)
+        # Get tissue-specific carrying capacities
+        # CSF regions have higher capacity (lower resistance to growth)
+        K = self._compute_node_carrying_capacities()
+
+        # Reaction term (logistic growth) with per-node carrying capacity
+        # Avoid division by zero for skull nodes (K=0)
+        K_safe = np.maximum(K, 1e-10)
+        reaction = rho * density * (1 - density / K_safe)
+
+        # For skull nodes (K=0), force reaction to be negative (no growth)
+        skull_mask = K < 1e-10
+        reaction[skull_mask] = -rho * density[skull_mask]
 
         # Right-hand side: M * (c_n + dt * reaction)
         rhs = self._mass_matrix @ (density + dt * reaction)
@@ -1493,8 +1628,8 @@ class TumorGrowthSolver:
         # Solve
         new_density = spsolve(A, rhs)
 
-        # Ensure non-negative and bounded
-        new_density = np.clip(new_density, 0, K)
+        # Ensure non-negative and bounded by local carrying capacity
+        new_density = np.clip(new_density, 0, K_safe)
 
         return new_density
 

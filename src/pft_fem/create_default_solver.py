@@ -158,7 +158,7 @@ def create_default_solver(
 
     solver = TumorGrowthSolver(
         mesh=mesh,
-        boundary_condition="fixed",
+        boundary_condition="skull_csf_free",  # Fixed skull, free CSF (fourth ventricle)
         biophysical_constraints=bc,
         solver_config=solver_config,
     )
@@ -191,7 +191,7 @@ This directory contains a precomputed FEM solver for posterior fossa tumor simul
 - **Region**: Posterior fossa (cerebellum + brainstem)
 - **Tissue segmentation**: MNI152 FAST segmentation (GM/WM/CSF)
 - **Fiber orientations**: HCP1065 DTI atlas
-- **Boundary condition**: Fixed (skull immovable)
+- **Boundary condition**: Skull fixed, CSF free (fourth ventricle can be displaced)
 - **Voxel size**: 1.0 mm isotropic
 
 ## Usage
