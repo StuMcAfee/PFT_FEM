@@ -823,7 +823,7 @@ Options:
   -a, --atlas PATH           Path to SUIT atlas directory (optional)
   -d, --duration FLOAT       Simulation duration in days (default: 30)
   --tumor-center X Y Z       Tumor seed center in mm (default: 0 0 0)
-  --tumor-radius FLOAT       Initial tumor radius in mm (default: 5)
+  --tumor-radius FLOAT       Initial tumor radius in mm (default: 2)
   --proliferation-rate FLOAT Growth rate in 1/day (default: 0.012)
   --diffusion-rate FLOAT     Diffusion rate in mm²/day (default: 0.15)
   --sequences [T1|T2|FLAIR|T1_contrast|DWI]
@@ -970,7 +970,7 @@ print(f"Generated {len(result.mri_images)} MRI sequences")
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | `center` | (0, 0, 0) | Within atlas bounds | Tumor seed location (mm) |
-| `initial_radius` | 5.0 | 1.0 - 20.0 | Starting radius (mm) |
+| `initial_radius` | 2.0 | 1.0 - 20.0 | Starting radius (mm) |
 | `proliferation_rate` | 0.012 | 0.001 - 0.1 | Growth rate (1/day) |
 | `diffusion_rate` | 0.15 | 0.01 - 1.0 | Spread rate (mm²/day) |
 | `carrying_capacity` | 1.0 | 0.5 - 1.0 | Max cell density |

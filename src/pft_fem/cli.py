@@ -56,8 +56,8 @@ def main(args: Optional[list] = None) -> int:
     parser.add_argument(
         "--tumor-radius",
         type=float,
-        default=1.0,
-        help="Initial tumor radius in mm (default: 1)",
+        default=2.0,
+        help="Initial tumor radius in mm (default: 2)",
     )
 
     parser.add_argument(
