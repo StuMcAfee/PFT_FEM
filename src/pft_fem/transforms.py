@@ -378,8 +378,21 @@ class SpatialTransform:
             "source_space": self.source_space,
             "target_space": self.target_space,
             "max_displacement_mm": self.get_max_displacement(),
-            "metadata": self.metadata,
+            "metadata": self._serialize_metadata(self.metadata),
         }
+
+    def _serialize_metadata(self, obj: Any) -> Any:
+        """Recursively convert numpy arrays and tuples to JSON-serializable types."""
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (tuple, list)):
+            return [self._serialize_metadata(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._serialize_metadata(v) for k, v in obj.items()}
+        elif isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        else:
+            return obj
 
 
 class ANTsTransformExporter:

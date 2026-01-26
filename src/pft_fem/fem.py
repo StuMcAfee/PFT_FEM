@@ -398,13 +398,12 @@ class MaterialProperties:
 
     # Tissue-specific carrying capacity multipliers
     # Higher values allow more tumor growth in those regions (less resistance)
-    # CSF-filled spaces (like fourth ventricle) offer minimal resistance to tumor expansion
     tissue_carrying_capacity_multipliers: Dict[TissueType, float] = field(default_factory=lambda: {
         TissueType.GRAY_MATTER: 1.0,  # Baseline
         TissueType.WHITE_MATTER: 1.0,  # Same as gray matter
-        TissueType.CSF: 2.0,  # 2x capacity - tumor can easily fill CSF spaces
+        TissueType.CSF: 1.0,  # Same as tissue - prevents cystic compartmentalization
         TissueType.TUMOR: 1.0,  # Normal within tumor
-        TissueType.EDEMA: 1.2,  # Slightly easier growth in edematous tissue
+        TissueType.EDEMA: 1.0,  # Same as tissue
         TissueType.SKULL: 0.0,  # No growth in skull
     })
 

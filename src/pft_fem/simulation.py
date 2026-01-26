@@ -74,7 +74,7 @@ class TumorParameters:
     initial_density: float = 0.9  # Higher density for solid tumor
     proliferation_rate: float = 0.04  # Higher rate for solid mass growth
     diffusion_rate: float = 0.01  # Very low - minimal infiltration
-    necrotic_threshold: float = 0.95  # Higher threshold - less central necrosis
+    necrotic_threshold: float = 0.99  # Very high - minimal central necrosis for uniform tumor
     edema_extent: float = 5.0  # Less edema for non-infiltrative tumor
     enhancement_ring: bool = True
 
