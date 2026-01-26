@@ -1019,6 +1019,24 @@ class TumorGrowthSolver:
         csf_mask = self._node_tissues == 1
         return np.where(csf_mask)[0].astype(np.int32)
 
+    def _get_anterior_brainstem_boundary_nodes(self) -> NDArray[np.int32]:
+        """
+        Get nodes on the anterior boundary of the brainstem (clivus).
+
+        These nodes should always have fixed boundary conditions to
+        represent the clivus (petrous bone) that constrains the anterior
+        brainstem, preventing unrealistic anterior tumor expansion.
+
+        Returns:
+            Array of node indices on the anterior brainstem boundary.
+        """
+        if self.biophysical_constraints is None:
+            return np.array([], dtype=np.int32)
+
+        return self.biophysical_constraints._compute_anterior_brainstem_boundary(
+            self.mesh.nodes
+        )
+
     def _get_node_tissue_type(self, node_idx: int) -> TissueType:
         """Get the tissue type for a node."""
         if self._node_tissues is None:
@@ -1414,12 +1432,13 @@ class TumorGrowthSolver:
 
         This boundary condition mode:
         1. Fixes skull boundary nodes (immovable, like brain-skull interface)
-        2. Leaves CSF nodes completely free (zero traction)
+        2. Fixes anterior brainstem boundary (clivus - always fixed as bone)
+        3. Leaves other CSF nodes free (zero traction)
 
-        This models the biophysical reality that CSF in the fourth ventricle
-        can be displaced with minimal resistance as tumors expand. The fluid
-        effectively offers no mechanical resistance - tumors fill this space
-        first because there is no tissue to push against.
+        This models the biophysical reality that:
+        - CSF in the fourth ventricle can be displaced with minimal resistance
+        - The anterior brainstem is bounded by the clivus (petrous bone), which
+          acts as a hard constraint preventing anterior tumor expansion
 
         Returns:
             Modified stiffness matrix with boundary conditions applied.
@@ -1432,9 +1451,14 @@ class TumorGrowthSolver:
         # Get CSF nodes (free - do not constrain these)
         csf_nodes = set(self._get_csf_nodes())
 
-        # Only constrain skull nodes that are NOT CSF
-        # (this handles the case where skull/CSF regions might overlap at boundaries)
-        constrained_nodes = skull_nodes - csf_nodes
+        # Get anterior brainstem boundary (clivus - always fixed, even if CSF)
+        anterior_brainstem = set(self._get_anterior_brainstem_boundary_nodes())
+
+        # CSF nodes that should remain free (exclude anterior brainstem boundary)
+        free_csf_nodes = csf_nodes - anterior_brainstem
+
+        # Constrained nodes: skull + anterior brainstem, minus free CSF
+        constrained_nodes = (skull_nodes | anterior_brainstem) - free_csf_nodes
 
         for node_idx in constrained_nodes:
             for dof in range(3):
